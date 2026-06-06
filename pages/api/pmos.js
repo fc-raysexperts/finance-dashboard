@@ -1,5 +1,5 @@
-// pages/api/pmos.js — Final correct version
-// Field mapping verified from live Zoho debug output
+// pages/api/pmos.js — Final version with 15-minute list cache
+// Fixes 52s load time: cold start takes 52s once, then cached for 15 min
 
 import { runPMOCompliance, runPMOAlignment, getComplianceStatus } from '../../lib/checklistEngine';
 const axios = require('axios');
@@ -45,20 +45,26 @@ async function zohoGET(path, params = {}) {
   }
 }
 
-// Extract module_fields into a clean key→value map
-// Uses api_name as key, value_formatted for lookups, value for everything else
+// Server-side list cache — stores all pending record IDs for 15 minutes
+// Avoids re-fetching 12 pages (2315 records) on every request
+let listCache    = { pending: [], fetchedAt: 0 };
+const LIST_TTL   = 15 * 60 * 1000; // 15 minutes
+
+// Detail cache — only re-fetch records that changed
+const detailCache = { records: {}, snapshot: {} };
+
+// Extract module_fields into a clean api_name → value map
+// Uses value_formatted for lookup fields (vendor name, customer name etc.)
 function extractFields(moduleFields) {
   const map = {};
   if (!Array.isArray(moduleFields)) return map;
   moduleFields.forEach(f => {
     const key = f.api_name || f.placeholder;
     if (!key) return;
-    // Lookup fields store an ID in value — the human-readable name is in value_formatted
     const isLookup = f.data_type === 'lookup' || f.rendering_type === 'lookup';
     map[key] = isLookup
       ? (f.value_formatted || f.value || '')
       : (f.value !== undefined && f.value !== null ? f.value : '');
-    // Always store value_formatted separately in case needed
     map[key + '_formatted'] = f.value_formatted || '';
   });
   return map;
@@ -69,91 +75,94 @@ function isJatinCurrentApprover(rec) {
   if (!Array.isArray(rec.approvers_list)) return false;
   return rec.approvers_list.some(a =>
     (a.approver_user_id === JATIN_USER_ID || a.email === APPROVER_EMAIL) &&
-    a.is_next_approver === true &&
-    a.has_approved === false &&
-    a.approval_status === 'pending_approval'
+    a.is_next_approver  === true &&
+    a.has_approved      === false &&
+    a.approval_status   === 'pending_approval'
   );
 }
-
-// Delta cache — only re-fetch records that changed
-const pmoCache = { records: {}, snapshot: {} };
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    // Step 1: Fetch ALL pages to collect every pending_approval record
-    // 2315 total records across 12 pages — must paginate all of them
+    // ── STEP 1: Get all pending records ──────────────────────
+    // Use 15-min list cache to avoid 12-page fetch on every request
     let allPending = [];
-    let page = 1;
 
-    while (true) {
-      const data = await zohoGET(`/${PMO_MODULE}`, { per_page: 200, page });
-      const recs  = data.module_records || [];
-
-      // Filter pending at list level — reduces detail calls from 200 → ~5 per page
-      const pending = recs.filter(r => r.status === 'pending_approval');
-      allPending = allPending.concat(pending);
-
-      if (!data.page_context?.has_more_page) break;
-      page++;
-      await new Promise(r => setTimeout(r, 200)); // avoid rate limiting
+    if (Date.now() - listCache.fetchedAt < LIST_TTL && listCache.pending.length > 0) {
+      allPending = listCache.pending;
+      console.log(`PMOs: list cache hit — ${allPending.length} pending`);
+    } else {
+      let page = 1;
+      while (true) {
+        const data    = await zohoGET(`/${PMO_MODULE}`, { per_page: 200, page });
+        const recs    = data.module_records || [];
+        const pending = recs.filter(r => r.status === 'pending_approval');
+        allPending    = allPending.concat(pending);
+        if (!data.page_context?.has_more_page) break;
+        page++;
+        await new Promise(r => setTimeout(r, 200));
+      }
+      listCache = { pending: allPending, fetchedAt: Date.now() };
+      console.log(`PMOs: fetched ${allPending.length} pending across ${page} pages — cached 15 min`);
     }
 
-    console.log(`PMOs: ${allPending.length} pending_approval across ${page} pages`);
-
-    // Step 2: Fetch detail for all pending records using delta cache
-    // Typically 66 records = 66 detail calls on cold start, then cached
+    // ── STEP 2: Fetch detail for pending records (delta cache) ─
     const detailed = [];
     for (let i = 0; i < allPending.length; i += 10) {
       const batch   = allPending.slice(i, i + 10);
-      const details = await Promise.all(batch.map(async r => {
+      const results = await Promise.all(batch.map(async r => {
         const id       = r.module_record_id;
         const modified = r.last_modified_time || '';
-
-        if (pmoCache.records[id] && pmoCache.snapshot[id] === modified) {
-          return pmoCache.records[id];
+        if (detailCache.records[id] && detailCache.snapshot[id] === modified) {
+          return detailCache.records[id];
         }
-
         try {
           const det    = await zohoGET(`/${PMO_MODULE}/${id}`);
           const record = det.data?.module_record || det.module_record || det;
-          pmoCache.records[id]  = record;
-          pmoCache.snapshot[id] = modified;
+          detailCache.records[id]  = record;
+          detailCache.snapshot[id] = modified;
           return record;
         } catch {
-          return r; // fallback to list-level data
+          return r;
         }
       }));
-      detailed.push(...details.filter(Boolean));
+      detailed.push(...results.filter(Boolean));
       if (i + 10 < allPending.length) await new Promise(r => setTimeout(r, 300));
     }
 
-    // Step 3: Filter to Jatin's current approvals
+    // ── STEP 3: Filter to Jatin's current approvals ────────────
     const jatinPMOs = detailed.filter(isJatinCurrentApprover);
     console.log(`PMOs: ${jatinPMOs.length} currently pending Jatin's approval`);
 
-    // Step 4: Map fields using confirmed api_name keys
+    // ── STEP 4: Map fields using confirmed api_name keys ────────
     const enriched = jatinPMOs.map(raw => {
       const f = extractFields(raw.module_fields);
 
-      // All field names confirmed from live debug output:
-      const pmoNumber     = f.cf_pmo_number     || raw.record_name || '';
-      const date          = f.cf_pmo_date        || f.cf_payment_date || '';
-      const purpose       = f.cf_remarks         || f.cf_payment_details || '';
-      const paymentTerms  = f.cf_payment_terms   || '';
-      const payCategory   = f.cf_payment_category || '';
-      const paySubCat     = f.cf_payment_sub_category || '';
-      const payType       = f.cf_payment_type    || '';
-      const amount        = parseFloat(f.cf_payable_amount) || 0;
-      // cf_vendor_name is a lookup — value_formatted has the actual name
-      const vendor        = f.cf_vendor_name     || '—';
-      const customerName  = f.cf_customer_name   || '';
-      const expenseAcct   = f.cf_expense_account || '';
-      const closingBal    = parseFloat(f.cf_closing_balance) || 0;
-      const attachmentId  = f.cf_attachment      || '';
+      // All field names confirmed from live debug:
+      // cf_pmo_number, cf_remarks, cf_pmo_date, cf_payment_terms,
+      // cf_payment_category, cf_attachment, cf_payment_sub_category,
+      // cf_payment_type, cf_payable_amount, cf_vendor_name (lookup→value_formatted),
+      // cf_customer_name, cf_expense_account, cf_closing_balance,
+      // cf_payment_date, cf_payment_details
 
-      // Build normalised object for compliance checks
+      const pmoNumber    = String(f.cf_pmo_number || raw.record_name || '');
+      const date         = String(f.cf_pmo_date   || f.cf_payment_date || '');
+      const purpose      = String(f.cf_remarks     || f.cf_payment_details || '');
+      const payTerms     = String(f.cf_payment_terms        || '');
+      const payCategory  = String(f.cf_payment_category     || '');
+      const paySubCat    = String(f.cf_payment_sub_category  || '');
+      const payType      = String(f.cf_payment_type         || '');
+      const amount       = parseFloat(f.cf_payable_amount)  || 0;
+      const vendor       = String(f.cf_vendor_name          || '—');
+      const customerName = String(f.cf_customer_name        || '');
+      const expenseAcct  = String(f.cf_expense_account      || '');
+      const closingBal   = parseFloat(f.cf_closing_balance) || 0;
+      const attachmentId = String(f.cf_attachment           || '');
+
+      const payTypeLabel = [payCategory, paySubCat, payType]
+        .filter(Boolean).join(' / ');
+
       const pmoNorm = {
         pmo_number:        pmoNumber,
         id:                raw.module_record_id,
@@ -161,7 +170,7 @@ export default async function handler(req, res) {
         vendor_name:       vendor,
         amount,
         description:       purpose,
-        payment_type:      `${payCategory} / ${paySubCat} / ${payType}`.replace(/^\/\s*|\/\s*$/g,'').trim(),
+        payment_type:      payTypeLabel,
         documents:         raw.documents || [],
         submitted_by_name: raw.submitted_by_name || '',
         closing_balance:   closingBal,
@@ -182,7 +191,8 @@ export default async function handler(req, res) {
         paymentCategory: payCategory,
         paymentSubCat:   paySubCat,
         paymentType:     payType,
-        paymentTerms,
+        paymentTerms:    payTerms,
+        payTypeLabel,
         customerName,
         expenseAccount:  expenseAcct,
         closingBalance:  closingBal,
@@ -200,7 +210,7 @@ export default async function handler(req, res) {
       };
     });
 
-    // Sort by date descending
+    // Sort by date descending — latest first
     enriched.sort((a, b) => {
       if (!a.date) return 1;
       if (!b.date) return -1;
@@ -212,9 +222,9 @@ export default async function handler(req, res) {
       count:   enriched.length,
       data:    enriched,
       debug: {
-        pages:   page,
         pending: allPending.length,
         jatin:   jatinPMOs.length,
+        cached:  Date.now() - listCache.fetchedAt < LIST_TTL,
       }
     });
 
