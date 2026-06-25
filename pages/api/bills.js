@@ -1,11 +1,60 @@
 // pages/api/bills.js
 // Returns all Bills pending Jatin's approval
 // Runs DUAL checks: (1) Bill compliance, (2) PO match + PFB alignment — separately
+//
+// This is your actual deployed logic (pulled from your repo) — the
+// checkBillAgainstPO line-item-level rate/qty variance check, severity
+// sorting, and detailed buildRecommendation() — merged with two
+// improvements confirmed needed afterwards:
+//   - findLinkedPO() checks bill.purchaseorders[], then line_items[]
+//     .purchaseorder_id, then a text-match fallback against reference
+//     number/notes — not just the single purchaseorders[0] field, which
+//     Zoho often leaves empty even when a PO really is linked.
+//   - Project matching uses line_items[].project_name, and the project
+//     list includes user-added projects + Zoho-name overrides from the
+//     store.
+// Data fetching is unchanged — getPendingBills() from lib/zoho.js (your
+// proven smart-delta-cache version) does all the list/detail/approver work.
 
-import { getPendingBills, getPODetail } from '../../lib/zoho';
+import { getPendingBills, getPODetail, getPendingPOs } from '../../lib/zoho';
 import { generatePFB, checkPOAlignment } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runBillCompliance, getComplianceStatus } from '../../lib/checklistEngine';
+const { storeGet, KEYS } = require('../../lib/store');
+
+// Items that legitimately have no PO — used so the "no reference" message
+// doesn't read as an error for these
+const NO_PO_EXPECTED_KEYWORDS = [
+  'electrical inspection', 'legal', 'loading', 'unloading', 'freight',
+  'transport', 'consultancy', 'professional fee', 'audit', 'bank charge',
+  'government fee', 'license', 'rvpnl', 'rrec', 'ceig',
+];
+
+function findLinkedPO(bill) {
+  // 1. Standard Zoho field: bill.purchaseorders array
+  if (Array.isArray(bill.purchaseorders) && bill.purchaseorders.length > 0) {
+    return bill.purchaseorders[0];
+  }
+  // 2. line_items[].purchaseorder_id — present even when the document-level
+  //    `purchaseorders` array is empty
+  const liWithPO = (bill.line_items || []).find(li => li.purchaseorder_id);
+  if (liWithPO) {
+    return { purchaseorder_id: liWithPO.purchaseorder_id, purchaseorder_number: liWithPO.purchaseorder_number || null };
+  }
+  // 3. Reference number text match — PO numbers often appear in notes/reference_number.
+  //    No real ID here, just a guessed number — can't fetch full detail for it.
+  const refText = `${bill.reference_number || ''} ${bill.notes || ''}`.toUpperCase();
+  const poMatch = refText.match(/PO[\/\s-]?\d{2,}[\/\-]\d{2,}[\/\-]\d{2,}/i) || refText.match(/PO\d{5,}/i);
+  if (poMatch) {
+    return { purchaseorder_id: null, purchaseorder_number: poMatch[0], _textMatched: true };
+  }
+  return null;
+}
+
+function isExpectedNoPOItem(lineItems) {
+  const allNames = (lineItems || []).map(li => (li.name || '').toLowerCase()).join(' ');
+  return NO_PO_EXPECTED_KEYWORDS.some(kw => allNames.includes(kw));
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
@@ -13,38 +62,58 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Fetch all bills pending Jatin's approval
+    const userProjects = (await storeGet(KEYS.USER_PROJECTS)) || [];
+    const zohoNameOvr   = (await storeGet(KEYS.ZOHO_NAME_OVR)) || {};
+    const allProjects = [...PROJECTS, ...userProjects].map(p => ({
+      ...p, zohoNames: [...(p.zohoNames || []), ...(zohoNameOvr[p.id] || [])]
+    }));
+
+    // 1. Fetch all bills pending Jatin's approval (smart delta cache — see lib/zoho.js)
     const bills = await getPendingBills();
+    console.log(`bills: ${bills.length} currently pending Jatin's approval`);
+
+    // Recent PO numbers, for verifying a text-matched reference is real
+    // (reuses getPendingPOs()'s own cache — no extra Zoho calls)
+    let recentPONumbers = [];
+    try {
+      const pos = await getPendingPOs();
+      recentPONumbers = pos.map(p => p.purchaseorder_number);
+    } catch {}
 
     // 2. Enrich each bill in parallel
     const enriched = await Promise.all(bills.map(async bill => {
+      const lineItems = bill.line_items || [];
 
-      // ── PROJECT MATCHING ──────────────────────────────────
-      const zohoProjectName =
-        bill.project_name  ||
-        bill.customer_name ||
-        '';
-      const project = matchProject(zohoProjectName, PROJECTS);
+      // ── PROJECT MATCHING — from line items (tag-based, reliable) ──
+      const projectNamesFromLines = [...new Set(lineItems.map(li => li.project_name).filter(Boolean))];
+      const zohoProjectName = projectNamesFromLines[0] || bill.project_name || bill.customer_name || '';
+      const project = projectNamesFromLines.map(pn => matchProject(pn, allProjects)).find(Boolean)
+                    || matchProject(zohoProjectName, allProjects);
 
-      // ── FETCH LINKED PO ───────────────────────────────────
-      // Bills in Zoho store their PO reference in purchaseorders array
-      let linkedPO = null;
-      const poRef  = bill.purchaseorders?.[0]?.purchaseorder_id || null;
-      if (poRef) {
-        try { linkedPO = await getPODetail(poRef); } catch { linkedPO = null; }
+      // ── FIND + FETCH LINKED PO ─────────────────────────────
+      let linkedPORef = findLinkedPO(bill);
+      // Text-matched guesses get verified against the real pending-PO list
+      if (linkedPORef?._textMatched && !recentPONumbers.includes(linkedPORef.purchaseorder_number)) {
+        linkedPORef = null;
       }
+      let linkedPO = null;
+      if (linkedPORef?.purchaseorder_id) {
+        try { linkedPO = await getPODetail(linkedPORef.purchaseorder_id); } catch { linkedPO = null; }
+      }
+      const noPOExpected = !linkedPORef && isExpectedNoPOItem(lineItems);
 
       // ── COMPLIANCE CHECK (always runs) ────────────────────
-      const compliance       = runBillCompliance(bill, linkedPO);
+      const compliance       = runBillCompliance(bill, linkedPO || linkedPORef);
       const complianceStatus = getComplianceStatus(compliance);
 
       // ── PO MATCH CHECK ────────────────────────────────────
-      // Checks each bill line item against the linked PO line items
+      // Checks each bill line item against the linked PO's line items —
+      // only possible when we have the PO's real detail (not a text guess)
       let poLineChecks = [];
       let poStatus     = 'na';
 
-      if (linkedPO && bill.line_items?.length > 0) {
-        poLineChecks = checkBillAgainstPO(bill.line_items, linkedPO.line_items || []);
+      if (linkedPO && lineItems.length > 0) {
+        poLineChecks = checkBillAgainstPO(lineItems, linkedPO.line_items || []);
         const hasReject = poLineChecks.some(c => c.status === 'reject');
         const hasFlag   = poLineChecks.some(c => c.status === 'flag');
         const hasNoMatch= poLineChecks.some(c => c.status === 'no_match');
@@ -52,20 +121,18 @@ export default async function handler(req, res) {
       }
 
       // ── PFB ALIGNMENT CHECK ───────────────────────────────
-      // Items not matching any PFB scope = 'na' (acceptable — not a flag)
       let pfbLineChecks = [];
       let pfbStatus     = 'na';
 
       if (project && project.dc && project.ac && project.sw) {
-        const pfbItems = generatePFB(project.name, project.dc, project.ac, project.sw);
-        pfbLineChecks  = checkPOAlignment(bill.line_items || [], pfbItems);
+        const pfbItems = generatePFB(project.name, project.dc, project.ac, project.sw, project.piling || 2000, project.wall || 2000, project.road || 2000);
+        pfbLineChecks  = checkPOAlignment(lineItems, pfbItems);
 
-        // Only consider items that actually matched a PFB scope
         const matchedChecks = pfbLineChecks.filter(l =>
           l.status !== 'na' && l.status !== 'no_match'
         );
         if (matchedChecks.length === 0) {
-          pfbStatus = 'na'; // all items outside PFB scope — not a problem
+          pfbStatus = 'na';
         } else if (matchedChecks.some(l => l.status === 'reject')) {
           pfbStatus = 'reject';
         } else if (matchedChecks.some(l => l.status === 'flag')) {
@@ -75,8 +142,7 @@ export default async function handler(req, res) {
         }
       }
 
-      // ── OVERALL ALIGNMENT STATUS ──────────────────────────
-      // Worst of poStatus and pfbStatus
+      // ── OVERALL ALIGNMENT STATUS — worst of poStatus and pfbStatus ──
       const alignmentStatus =
         [poStatus, pfbStatus].includes('reject') ? 'reject' :
         [poStatus, pfbStatus].includes('flag')   ? 'flag'   :
@@ -85,11 +151,10 @@ export default async function handler(req, res) {
 
       // ── FINAL RECOMMENDATION ──────────────────────────────
       const recommendation = buildRecommendation(
-        complianceStatus, alignmentStatus, compliance, linkedPO
+        complianceStatus, alignmentStatus, compliance, linkedPO || linkedPORef
       );
 
       return {
-        // Core bill fields
         id:             bill.bill_id,
         billNumber:     bill.bill_number,
         date:           bill.date,
@@ -97,28 +162,29 @@ export default async function handler(req, res) {
         vendor:         bill.vendor_name,
         vendorId:       bill.vendor_id,
         gstin:          bill.gst_no          || '',
-        projectZoho:    zohoProjectName,
+        projectZoho:    projectNamesFromLines.length ? projectNamesFromLines : (zohoProjectName ? [zohoProjectName] : []),
         projectMatched: project?.name        || null,
         projectId:      project?.id          || null,
         total:          bill.total,
         subTotal:       bill.sub_total,
         balance:        bill.balance,
         currency:       bill.currency_symbol || '₹',
-        lineItems:      bill.line_items      || [],
+        lineItems,
         taxes:          bill.taxes           || [],
         notes:          bill.notes           || '',
         terms:          bill.terms           || '',
         submittedBy:    bill.submitted_by_name || '',
         submittedDate:  bill.submitted_date    || '',
         attachments:    bill.documents         || [],
+        noPOExpected,
 
-        // Linked PO summary
-        linkedPO: linkedPO ? {
-          id:     linkedPO.purchaseorder_id,
-          number: linkedPO.purchaseorder_number,
-          total:  linkedPO.total,
-          vendor: linkedPO.vendor_name,
-          date:   linkedPO.date,
+        // Linked PO summary (uses full detail when we have it, otherwise the reference)
+        linkedPO: (linkedPO || linkedPORef) ? {
+          id:     linkedPO?.purchaseorder_id ?? linkedPORef?.purchaseorder_id ?? null,
+          number: linkedPO?.purchaseorder_number ?? linkedPORef?.purchaseorder_number ?? null,
+          total:  linkedPO?.total ?? null,
+          vendor: linkedPO?.vendor_name ?? null,
+          date:   linkedPO?.date ?? null,
         } : null,
 
         // DUAL STATUS — both shown as separate badges in the row
@@ -126,11 +192,10 @@ export default async function handler(req, res) {
         alignmentStatus,     // 'aligned' | 'flag' | 'reject' | 'na'
 
         // Detailed check arrays — used in View Details popup
-        compliance,          // Bill compliance checklist (30+ checks)
+        compliance,          // Bill compliance checklist
         poLineChecks,        // Bill line items vs PO line items
         pfbLineChecks,       // Bill line items vs PFB scope
 
-        // Intermediate statuses (useful for debugging)
         poStatus,
         pfbStatus,
 
@@ -166,13 +231,11 @@ function checkBillAgainstPO(billItems, poItems) {
   return billItems.map(bi => {
     const biName = (bi.name || '').toLowerCase().trim();
 
-    // Find best matching PO line item by name
     let bestMatch  = null;
     let bestScore  = 0;
 
     for (const pi of poItems) {
       const piName = (pi.name || '').toLowerCase().trim();
-      // Score based on common words
       const biWords = biName.split(/\s+/);
       const piWords = piName.split(/\s+/);
       const common  = biWords.filter(w => w.length > 2 && piWords.includes(w)).length;
@@ -198,12 +261,10 @@ function checkBillAgainstPO(billItems, poItems) {
       };
     }
 
-    // Rate variance — zero tolerance (bill rate must exactly equal PO rate)
     const rateVar = bestMatch.rate > 0
       ? ((bi.rate - bestMatch.rate) / bestMatch.rate * 100)
       : null;
 
-    // Qty variance — bill qty must not exceed PO qty
     const qtyVar = bestMatch.quantity > 0
       ? ((bi.quantity - bestMatch.quantity) / bestMatch.quantity * 100)
       : null;
@@ -238,13 +299,11 @@ function checkBillAgainstPO(billItems, poItems) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// FINAL RECOMMENDATION
-// Based on both compliance and alignment statuses
+// FINAL RECOMMENDATION — based on both compliance and alignment statuses
 // ─────────────────────────────────────────────────────────────
 function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
   const failed = compliance.filter(c => !c.passed);
 
-  // Critical failures — hard reject regardless of alignment
   const criticalFails = failed.filter(c =>
     ['bill_basic', 'vendor_active', 'po_ref', 'gst_type', 'amount_calc', 'bill_no_po'].includes(c.id)
   );
@@ -299,7 +358,7 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
     color:    'green',
     reasons:  [
       'All bill compliance checks passed',
-      linkedPO ? `Amounts match PO ${linkedPO.number}` : '',
+      linkedPO ? `Amounts match PO ${linkedPO.number || linkedPO.purchaseorder_number || ''}` : '',
       'PFB alignment confirmed',
     ].filter(Boolean),
   };

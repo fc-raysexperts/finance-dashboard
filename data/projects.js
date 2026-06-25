@@ -1,11 +1,15 @@
-// data/projects.js — Updated with verified districts and new project auto-detection
+// data/projects.js
+// Single source of truth for the 23 hardcoded current projects.
+// User-added projects/parks (item 2 of the request) live in lib/store.js
+// and get merged in by pages/api/projects.js — this file stays untouched
+// by runtime additions, exactly as before.
 
 const PROJECTS = [
   { id:"wonder3",  name:"Wonder Cement Phase 3",    firm:"Wonder Cement",         park:"SS Nagar Park", district:"Phalodi",  dc:75,    ac:null,  sw:null,  piling:2000, wall:2000, road:2000, bess:0,     epcCost:1.31, totalValue:210.75, agreementDate:"21-05-2026", endDate:"16-11-2026", quarter:"Q3 FY26-27", zohoNames:["LE0193","WONDER CEMENT LIMITED","WONDER CEMENT PHASE 3","WCP3"] },
-  { id:"jsw",      name:"JSW",                       firm:"JSW",                   park:"Pugal",         district:"Bikaner",  dc:72.5,  ac:50,    sw:8,     piling:2000, wall:2000, road:2000, bess:0,     epcCost:1.31, totalValue:203.73, agreementDate:"10-04-2026", endDate:"02-10-2026", quarter:"Q3 FY26-27", zohoNames:["LE0219","LE0220","LE0221","JSW 15","JSW 13","JSW GREEN"] },
+  { id:"jsw",      name:"JSW",                       firm:"JSW",                   park:"Pugal",         district:"Bikaner",  dc:72.5,  ac:50,    sw:8,     piling:2000, wall:2000, road:2000, bess:0,     epcCost:1.31, totalValue:203.73, agreementDate:"10-04-2026", endDate:"02-10-2026", quarter:"Q3 FY26-27", zohoNames:["LE0219","LE0220","LE0221","JSW 15","JSW 13","JSW 20","JSW GREEN"] },
   { id:"ravi",     name:"Ravi Surya Spa",             firm:"Ravi Surya Spa",        park:"Lunkaransar",   district:"Bikaner",  dc:2.08,  ac:1.39,  sw:1,     piling:2000, wall:2000, road:2000, bess:0,     epcCost:1.482,totalValue:6.14,   agreementDate:"14-03-2026", endDate:"08-09-2026", quarter:"Q2 FY26-27", zohoNames:["LE0218","RAVI SU GROUP","RAVI SURYA"] },
   { id:"metallic", name:"Metallic Rolls",             firm:"Metallic Rolls",        park:"Bhamatsar",     district:"Bikaner",  dc:0.52,  ac:0.35,  sw:1,     piling:500,  wall:500,  road:500,  bess:0,     epcCost:1.47, totalValue:1.53,   agreementDate:"07-03-2026", endDate:"01-09-2026", quarter:"Q2 FY26-27", zohoNames:["LE0217","METALIC ROLLS","METALLIC ROLLS"] },
-  { id:"ananta",   name:"Shree Ananta Dream Homes",   firm:"Shree Ananta Dream Homes",park:"Bhamatsar",   district:"Bikaner",  dc:0.3,   ac:0.25,  sw:1,     piling:300,  wall:300,  road:300,  bess:0,     epcCost:1.53, totalValue:0.9,    agreementDate:"06-03-2026", endDate:"31-08-2026", quarter:"Q2 FY26-27", zohoNames:["LE0216","S ANANTA HOME","SHREE ANANTA"] },
+  { id:"ananta",   name:"Shree Ananta Dream Homes",   firm:"Shree Ananta Dream Homes", park:"Bhamatsar",   district:"Bikaner",  dc:0.3,   ac:0.25,  sw:1,     piling:300,  wall:300,  road:300,  bess:0,     epcCost:1.53, totalValue:0.9,    agreementDate:"06-03-2026", endDate:"31-08-2026", quarter:"Q2 FY26-27", zohoNames:["LE0216","S ANANTA HOME","SHREE ANANTA"] },
   { id:"bkt",      name:"BKT Industries",             firm:"BKT Industries",        park:"Dechu",         district:"Phalodi",  dc:16,    ac:10.7,  sw:2,     piling:2000, wall:2000, road:2000, bess:3.34,  epcCost:1.38, totalValue:49.9,   agreementDate:"25-02-2026", endDate:"22-08-2026", quarter:"Q2 FY26-27", zohoNames:["LE0214","BALKRISNA IND","BALKRISHNA INDUSTRIES"] },
   { id:"alliance", name:"Alliance Poly Sacks",        firm:"Alliance Poly Sacks",   park:"Dechu",         district:"Phalodi",  dc:3.2,   ac:2.2,   sw:1,     piling:700,  wall:700,  road:700,  bess:0,     epcCost:1.72, totalValue:10.21,  agreementDate:"23-02-2026", endDate:"20-08-2026", quarter:"Q2 FY26-27", zohoNames:["LE0212","ALLIANCE POLYSACKS","ALLIANCE POLY"] },
   { id:"siddharth",name:"Siddharth Polysacks",        firm:"Siddharth Polysacks",   park:"Dechu",         district:"Phalodi",  dc:1.25,  ac:0.84,  sw:1,     piling:400,  wall:400,  road:400,  bess:0,     epcCost:1.72, totalValue:3.99,   agreementDate:"23-02-2026", endDate:"20-08-2026", quarter:"Q2 FY26-27", zohoNames:["LE0211","SIDHARTH POLYSACKS","SIDDHARTH POLY"] },
@@ -26,7 +30,9 @@ const PROJECTS = [
   { id:"miracle",  name:"Miracle",                    firm:"Miracle",               park:"Dechu",         district:"Phalodi",  dc:6,     ac:4,     sw:1,     piling:1500, wall:1500, road:1500, bess:0,     epcCost:null, totalValue:null,   agreementDate:null,         endDate:null,         quarter:"",            zohoNames:["LE0215","MIRACLE CORO"] },
 ];
 
-// Solar Parks with verified district info
+// Solar Parks (district/state hardcoded for the 7 known parks — item 1 of
+// the request before this one). New user-added parks get district/state
+// from whatever the user enters in the Add Park modal.
 const SOLAR_PARKS = {
   "SS Nagar Park": { district:"Phalodi", state:"Rajasthan", projects:["wonder3"] },
   "Pugal":         { district:"Bikaner", state:"Rajasthan", projects:["jsw"] },
@@ -38,16 +44,27 @@ const SOLAR_PARKS = {
 };
 
 // ── HELPERS ───────────────────────────────────────────────────
+
+// Revenue quarter from an end date — "format given earlier" = Indian FY
+// (Apr-Jun=Q1, Jul-Sep=Q2, Oct-Dec=Q3, Jan-Mar=Q4) labelled "Q_ FY YY-YY"
+function quarterFromEndDate(endDateDDMMYYYY) {
+  if (!endDateDDMMYYYY) return '';
+  const [d, m, y] = endDateDDMMYYYY.split('-').map(Number);
+  if (!m || !y) return '';
+  let fyStartYear = m >= 4 ? y : y - 1;
+  const q = m >= 4 && m <= 6 ? 1 : m >= 7 && m <= 9 ? 2 : m >= 10 && m <= 12 ? 3 : 4;
+  const fyEndYear = fyStartYear + 1;
+  return `Q${q} FY${String(fyStartYear).slice(2)}-${String(fyEndYear).slice(2)}`;
+}
+
 function matchProject(zohoName, projects) {
   if (!zohoName) return null;
   const z = zohoName.toUpperCase().trim();
-  // 1. Exact LE code match (most reliable)
   const leMatch = z.match(/LE\d{4}/i);
   if (leMatch) {
     const found = projects.find(p => p.zohoNames.some(a => a.toUpperCase() === leMatch[0].toUpperCase()));
     if (found) return found;
   }
-  // 2. Keyword match
   for (const p of projects) {
     for (const alias of p.zohoNames) {
       if (z.includes(alias.toUpperCase())) return p;
@@ -57,38 +74,33 @@ function matchProject(zohoName, projects) {
 }
 
 function projectIsReady(p) {
-  return p.dc!=null && p.ac!=null && p.sw!=null;
+  return p.dc != null && p.ac != null && p.sw != null;
 }
 
 function groupByFirm(projects) {
   const map = {};
   for (const p of projects) {
     const firm = p.firm || p.name;
-    if (!map[firm]) map[firm] = { firmName:firm, projects:[] };
+    if (!map[firm]) map[firm] = { firmName: firm, projects: [] };
     map[firm].projects.push(p);
   }
+  const toComp = d => (d || '').split('-').reverse().join('-');
   for (const f of Object.values(map)) {
-    f.projects.sort((a,b) => {
+    f.projects.sort((a, b) => {
       if (!a.agreementDate) return 1;
       if (!b.agreementDate) return -1;
-      // DD-MM-YYYY → compare as YYYY-MM-DD
-      const toComp = d => d.split('-').reverse().join('-');
       return toComp(b.agreementDate).localeCompare(toComp(a.agreementDate));
     });
   }
-  return Object.values(map).sort((a,b) => {
+  return Object.values(map).sort((a, b) => {
     const aDate = a.projects[0]?.agreementDate;
     const bDate = b.projects[0]?.agreementDate;
     if (!aDate) return 1; if (!bDate) return -1;
-    const toComp = d => d.split('-').reverse().join('-');
     return toComp(bDate).localeCompare(toComp(aDate));
   });
 }
 
-// New project detection: checks Zoho names against known projects
-// Returns true if this zohoName doesn't match any known project
-function isNewProject(zohoName) {
-  return matchProject(zohoName, PROJECTS) === null;
-}
-
-module.exports = { PROJECTS, SOLAR_PARKS, matchProject, projectIsReady, groupByFirm, isNewProject };
+module.exports = {
+  PROJECTS, SOLAR_PARKS,
+  matchProject, projectIsReady, groupByFirm, quarterFromEndDate,
+};

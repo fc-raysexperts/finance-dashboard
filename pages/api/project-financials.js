@@ -1,85 +1,132 @@
 // pages/api/project-financials.js
-// Fetches aggregated financial totals for a project from Zoho Books
-// Called when opening a project detail popup
+// Completely rewritten. Old approach: for every project popup, paginate
+// through 5 Zoho Books document types (PO/Bill/Invoice/SO/CN) with a
+// detail-fetch for every document missing project info at the list level
+// — could cost 100+ Books API calls for a SINGLE project, and confirmed to
+// burn through the entire shared daily Books quota from checking just a
+// few projects once.
+//
+// New approach: Zoho Analytics already has this exact data pre-aggregated
+// (the "Project Wise detail" Pivot view under the Budget-Dashboard
+// workspace — the same one you already use) via its OWN, completely
+// separate API and quota. One call fetches EVERY project's totals at
+// once; the result is cached for hours, so every project view after the
+// first costs zero additional calls of any kind, against either Books or
+// Analytics.
+//
+// Workspace/view/org IDs below were discovered and confirmed live via
+// zoho-analytics-diagnostic.js — not guessed:
+//   - Workspace: Budget-Dashboard (425861000000008002)
+//   - View: "Project Wise detail", a Pivot view (425861000002975091) —
+//     NOT the "Budget-Dashboard" Dashboard container some URLs point to;
+//     dashboards only export as PDF/HTML, this Pivot view is the actual
+//     data table.
+//   - Org: rayszoho (60039390994) — the other discovered org
+//     (jatin.srivastava) doesn't own this workspace.
 
 const axios = require('axios');
+const { getAnalyticsAccessToken } = require('../../lib/zohoAnalyticsToken');
+const { storeGet, storeSet } = require('../../lib/store');
+const { PROJECTS, matchProject } = require('../../data/projects');
 
-let cachedToken = null; let tokenExpiry = 0;
-async function getToken() {
-  if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
-  const res = await axios.post('https://accounts.zoho.in/oauth/v2/token', null, {
-    params: { refresh_token:process.env.ZOHO_REFRESH_TOKEN, client_id:process.env.ZOHO_CLIENT_ID, client_secret:process.env.ZOHO_CLIENT_SECRET, grant_type:'refresh_token' }
-  });
-  cachedToken = res.data.access_token; tokenExpiry = Date.now() + 55*60*1000;
-  return cachedToken;
+const WORKSPACE_ID = '425861000000008002';
+const VIEW_ID = '425861000002975091';
+const ORG_ID = '60039390994';
+
+const CACHE_KEY = 'zoho_analytics_project_financials';
+const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours — one fetch covers every project, so a long TTL costs nothing extra later
+
+// Zoho Analytics returns amounts as Indian-formatted strings, e.g.
+// "4,31,38,51,338.00" — not plain numbers.
+function parseIndianNumber(s) {
+  if (typeof s === 'number') return s;
+  if (!s) return 0;
+  const n = parseFloat(String(s).replace(/,/g, ''));
+  return isNaN(n) ? 0 : n;
 }
 
-async function zohoGET(path, params = {}) {
-  const token = await getToken();
-  for (let i = 1; i <= 3; i++) {
-    try {
-      const res = await axios.get(`https://www.zohoapis.in/books/v3${path}`, {
-        headers: { Authorization: `Zoho-oauthtoken ${token}` },
-        params:  { organization_id: process.env.ZOHO_ORG_ID, ...params }
-      });
-      return res.data;
-    } catch (e) {
-      if (e.response?.status === 429 && i < 3) { await new Promise(r => setTimeout(r, i * 2000)); continue; }
-      throw e;
-    }
+async function fetchAllProjectTotalsFromAnalytics() {
+  const token = await getAnalyticsAccessToken();
+  const headers = { Authorization: `Zoho-oauthtoken ${token}`, 'ZANALYTICS-ORGID': ORG_ID };
+
+  // 1. Create the export job (this view requires async export — confirmed
+  //    live; the simple sync endpoint returns SYNC_EXPORT_NOT_ALLOWED for it)
+  const createRes = await axios.get(
+    `https://analyticsapi.zoho.in/restapi/v2/bulk/workspaces/${WORKSPACE_ID}/views/${VIEW_ID}/data`,
+    { headers, params: { CONFIG: JSON.stringify({ responseFormat: 'json' }) } }
+  );
+  const jobId = createRes.data?.data?.jobId;
+  if (!jobId) throw new Error('No export jobId returned from Zoho Analytics');
+
+  // 2. Poll for completion — the real run completed on the very first
+  //    poll, but allow up to ~30s before giving up
+  let downloadUrl = null;
+  for (let attempt = 0; attempt < 15; attempt++) {
+    await new Promise(r => setTimeout(r, 2000));
+    const statusRes = await axios.get(
+      `https://analyticsapi.zoho.in/restapi/v2/bulk/workspaces/${WORKSPACE_ID}/exportjobs/${jobId}`,
+      { headers }
+    );
+    const jobStatus = statusRes.data?.data?.jobStatus;
+    if (jobStatus === 'JOB COMPLETED') { downloadUrl = statusRes.data?.data?.downloadUrl; break; }
+    if (jobStatus && jobStatus.includes('FAIL')) throw new Error('Zoho Analytics export job failed: ' + jobStatus);
   }
+  if (!downloadUrl) throw new Error('Zoho Analytics export job did not complete in time');
+
+  // 3. Download the actual rows
+  const downloadRes = await axios.get(downloadUrl, { headers });
+  const rows = downloadRes.data?.data || downloadRes.data;
+  return Array.isArray(rows) ? rows : [];
 }
 
-// Sum totals from a paginated list endpoint filtered by project name keywords
-async function sumProjectTotals(endpoint, listKey, amountField, projectKeywords) {
-  let total = 0;
-  // Search for each keyword variant
-  for (const keyword of projectKeywords.slice(0, 3)) { // limit to 3 searches per type
+async function getAllProjectTotals(forceRefresh) {
+  if (!forceRefresh) {
     try {
-      const data = await zohoGET(endpoint, { search_text: keyword, per_page: 200 });
-      const items = data[listKey] || [];
-      items.forEach(item => {
-        total += parseFloat(item[amountField] || item.total || 0);
-      });
-    } catch { /* skip failed searches */ }
-    await new Promise(r => setTimeout(r, 100)); // small pause between calls
+      const cached = await storeGet(CACHE_KEY);
+      if (cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
+        return cached.rows;
+      }
+    } catch { /* fall through to a fresh fetch */ }
   }
-  return total;
+  const rows = await fetchAllProjectTotalsFromAnalytics();
+  await storeSet(CACHE_KEY, { rows, fetchedAt: Date.now() }).catch(() => {});
+  return rows;
 }
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  let zohoNames = [];
   try {
-    zohoNames = JSON.parse(decodeURIComponent(req.query.zohoNames || '[]'));
-  } catch {
-    return res.status(400).json({ error: 'Invalid zohoNames parameter' });
-  }
+    const zohoNames = JSON.parse(req.query.zohoNames || '[]');
+    const forceRefresh = req.query.refresh === '1';
 
-  if (!zohoNames.length) {
-    return res.status(200).json({ success: true, data: { poTotal: 0, billTotal: 0, invoiceTotal: 0, soTotal: 0, cnTotal: 0 } });
-  }
+    const allRows = await getAllProjectTotals(forceRefresh);
 
-  // Use LE codes for searching — most precise
-  const searchTerms = zohoNames.filter(n => /^LE\d{4}/.test(n)).slice(0, 2);
-  if (!searchTerms.length) searchTerms.push(...zohoNames.slice(0, 2));
+    // Reuse the exact same matchProject() logic already relied on
+    // elsewhere in the app — pass this project's own zohoNames as a
+    // single-item "project list" so each Analytics row gets checked
+    // against just this project's aliases.
+    const targetAsProjectList = [{ id: '__target__', zohoNames }];
+    const matchingRows = allRows.filter(row => !!matchProject(row['Project Name'], targetAsProjectList));
 
-  try {
-    const [poTotal, billTotal, invoiceTotal, soTotal, cnTotal] = await Promise.all([
-      sumProjectTotals('/purchaseorders', 'purchaseorders', 'total', searchTerms),
-      sumProjectTotals('/bills',          'bills',          'total', searchTerms),
-      sumProjectTotals('/invoices',       'invoices',       'total', searchTerms),
-      sumProjectTotals('/salesorders',    'salesorders',    'total', searchTerms),
-      sumProjectTotals('/creditnotes',    'creditnotes',    'total', searchTerms),
-    ]);
-
-    return res.status(200).json({
-      success: true,
-      data: { poTotal, billTotal, invoiceTotal, soTotal, cnTotal },
+    // Projects with more than one Zoho code (e.g. JSW has 3, Soni has 2)
+    // appear as separate rows in this view — sum all matches, don't just
+    // take the first one. Confirmed against your real export data.
+    const data = {
+      poTotal: 0, billTotal: 0, invoiceTotal: 0, soTotal: 0, cnTotal: 0, budgetAmount: 0,
+    };
+    matchingRows.forEach(row => {
+      data.poTotal      += parseIndianNumber(row['Total PO Amount']);
+      data.billTotal    += parseIndianNumber(row['Total Bill Amount']);
+      data.invoiceTotal += parseIndianNumber(row['Total Invoice Amount']);
+      data.soTotal       += parseIndianNumber(row['Total SO Amount']);
+      data.cnTotal        += parseIndianNumber(row['Total CN Amount']);
+      data.budgetAmount    += parseIndianNumber(row['Budget Amount']);
     });
+
+    return res.status(200).json({ success: true, data, matchedRows: matchingRows.length, source: 'zoho-analytics' });
   } catch (err) {
-    console.error('Project financials error:', err.message);
+    console.error('Project financials (Analytics) error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 }
