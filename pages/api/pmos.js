@@ -121,6 +121,11 @@ export default async function handler(req, res) {
         const recs    = data.module_records || [];
         const pending = recs.filter(r => r.status === 'pending_approval');
         allPending    = allPending.concat(pending);
+        // Diagnostic: confirming whether this custom module's API actually
+        // honors per_page=200, or silently caps it lower — if it caps it,
+        // genuinely needing several list calls for ~84 records would be a
+        // hard Zoho-side limit, not a bug in this code.
+        console.log(`PMOs: page ${page} returned ${recs.length} records (requested per_page=200), has_more_page=${data.page_context?.has_more_page}, page_context=${JSON.stringify(data.page_context)}`);
         if (!data.page_context?.has_more_page) break;
         page++;
         await new Promise(r => setTimeout(r, 200));
