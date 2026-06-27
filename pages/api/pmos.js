@@ -51,25 +51,27 @@ async function zohoGET(path, params = {}) {
   }
 }
 
-let listCache     = { pending: [], fetchedAt: 0 };
-const detailCache = { records: {}, snapshot: {} };
-let hydrated      = false; // have we tried loading from KV yet, this process lifetime?
+const detailCache     = {}; // id -> full record, ONLY for items confirmed to be Jatin's
+const checkedSnapshot = {}; // id -> { modified, isJatin } for EVERY item ever checked, tiny
+let hydrated = false; // have we tried loading from KV yet, this process lifetime?
 
 async function hydrateFromPersistedStore() {
   if (hydrated) return;
   hydrated = true;
   try {
     const persisted = await storeGet(KEYS.ZOHO_DELTA_PMOS);
-    if (persisted && Object.keys(persisted.detailCache?.records || {}).length > 0) {
-      listCache   = persisted.listCache   || listCache;
-      detailCache.records  = persisted.detailCache.records  || {};
-      detailCache.snapshot = persisted.detailCache.snapshot || {};
+    // checkedSnapshot is the new shape — an old persisted cache (pre-
+    // redesign) won't have it, so it's treated as nothing usable yet and
+    // this does one clean bootstrap under the new, much smaller structure.
+    if (persisted && persisted.checkedSnapshot && Object.keys(persisted.checkedSnapshot).length > 0) {
+      Object.assign(detailCache, persisted.detailCache || {});
+      Object.assign(checkedSnapshot, persisted.checkedSnapshot || {});
     }
   } catch { /* KV unavailable — proceed with whatever's in memory */ }
 }
 
 async function persistStore() {
-  await storeSet(KEYS.ZOHO_DELTA_PMOS, { listCache, detailCache }).catch(() => {});
+  await storeSet(KEYS.ZOHO_DELTA_PMOS, { detailCache, checkedSnapshot }).catch(() => {});
 }
 
 function extractFields(moduleFields) {
@@ -107,10 +109,10 @@ export default async function handler(req, res) {
     let detailed;
     let allPending = [];
 
-    if (!forceRefresh && Object.keys(detailCache.records).length > 0) {
+    if (!forceRefresh && Object.keys(checkedSnapshot).length > 0) {
       // Normal page load: serve straight from the persisted cache, zero Zoho calls
-      detailed = Object.values(detailCache.records);
-      allPending = detailed; // for the debug field below — no separate list-fetch happened on this path
+      detailed = Object.values(detailCache);
+      allPending = detailed; // for the debug field below — no list-fetch happened on this path
       console.log(`PMOs: cache hit — ${detailed.length} records, no Zoho calls`);
     } else {
       let page = 1;
@@ -123,59 +125,61 @@ export default async function handler(req, res) {
         page++;
         await new Promise(r => setTimeout(r, 200));
       }
-      listCache = { pending: allPending, fetchedAt: Date.now() };
       console.log(`PMOs: fetched ${allPending.length} pending across pages`);
 
-      // Same conservative pre-filter as lib/zoho.js: if the list-level
-      // record already includes a usable approvers_list, skip detail
-      // calls for anything it clearly shows isn't Jatin's. If
-      // approvers_list isn't present at the list level for this module,
-      // every item is kept and detail-checked exactly as before — this
-      // can only reduce wasted calls, never hide a real pending item.
-      const relevantPending = allPending.filter(r =>
-        !Array.isArray(r.approvers_list) || isJatinCurrentApprover(r)
-      );
-      const skipped = allPending.length - relevantPending.length;
-      if (skipped > 0) {
-        console.log(`PMOs: ${skipped} confirmed not Jatin's at list level (skipped), ${relevantPending.length} to actually check`);
+      // Find what's new or changed SINCE WE LAST CHECKED IT — not just
+      // since it was last confirmed as Jatin's. Confirmed via production
+      // logs that this account's list response doesn't expose a usable
+      // approver field, so every item's status can only be known via its
+      // detail — but once checked, that result (yes OR no) is remembered
+      // permanently via the tiny marker below, so company-wide activity
+      // that has nothing to do with Jatin's queue only ever costs once
+      // per item, never again, no matter how many times it's refreshed.
+      const toFetch    = [];
+      const currentIds = new Set();
+      for (const r of allPending) {
+        const id       = r.module_record_id;
+        const modified = r.last_modified_time || '';
+        currentIds.add(id);
+        const checked = checkedSnapshot[id];
+        if (checked && checked.modified === modified) continue; // already known, skip
+        toFetch.push(r);
       }
 
-      detailed = [];
-      for (let i = 0; i < relevantPending.length; i += 10) {
-        const batch   = relevantPending.slice(i, i + 10);
-        const results = await Promise.all(batch.map(async r => {
-          const id       = r.module_record_id;
-          const modified = r.last_modified_time || '';
-          if (detailCache.records[id] && detailCache.snapshot[id] === modified) {
-            return detailCache.records[id];
-          }
-          try {
-            const det    = await zohoGET(`/${PMO_MODULE}/${id}`);
-            const record = det.data?.module_record || det.module_record || det;
-            detailCache.records[id]  = record;
-            detailCache.snapshot[id] = modified;
-            return record;
-          } catch {
-            return r;
-          }
-        }));
-        detailed.push(...results.filter(Boolean));
-        if (i + 10 < relevantPending.length) await new Promise(r => setTimeout(r, 300));
+      // Drop anything no longer in the live list at all (approved/rejected)
+      for (const id of Object.keys(checkedSnapshot)) {
+        if (!currentIds.has(id)) { delete checkedSnapshot[id]; delete detailCache[id]; }
       }
 
-      // Drop cached records no longer in the live, Jatin-relevant pending
-      // list (approved/rejected, OR now confirmed to belong to someone
-      // else) — this is also what shrinks an existing bloated cache back
-      // down once this runs.
-      const currentIds = new Set(relevantPending.map(r => r.module_record_id));
-      for (const id of Object.keys(detailCache.records)) {
-        if (!currentIds.has(id)) { delete detailCache.records[id]; delete detailCache.snapshot[id]; }
+      if (toFetch.length > 0) {
+        console.log(`PMOs: ${allPending.length} pending company-wide, ${toFetch.length} new/changed since last check`);
+        for (let i = 0; i < toFetch.length; i += 10) {
+          const batch = toFetch.slice(i, i + 10);
+          await Promise.all(batch.map(async r => {
+            const id       = r.module_record_id;
+            const modified = r.last_modified_time || '';
+            try {
+              const det     = await zohoGET(`/${PMO_MODULE}/${id}`);
+              const record  = det.data?.module_record || det.module_record || det;
+              const isJatin = isJatinCurrentApprover(record);
+              checkedSnapshot[id] = { modified, isJatin };
+              if (isJatin) detailCache[id] = record;
+              else delete detailCache[id]; // never keep full detail for anyone else's
+            } catch { /* leave unmarked — will be retried next refresh */ }
+          }));
+          if (i + 10 < toFetch.length) await new Promise(r => setTimeout(r, 300));
+        }
+      } else {
+        console.log(`PMOs: ${allPending.length} pending company-wide, 0 changed since last check — using cache`);
       }
 
       await persistStore();
+
+      // detailCache only ever contains Jatin's own by construction now
+      detailed = Object.values(detailCache);
     }
 
-    const jatinPMOs = detailed.filter(isJatinCurrentApprover);
+    const jatinPMOs = detailed;
     console.log(`PMOs: ${jatinPMOs.length} currently pending Jatin's approval`);
 
     const enriched = jatinPMOs.map(raw => {
