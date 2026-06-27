@@ -16,7 +16,7 @@
 // Data fetching is unchanged — getPendingBills() from lib/zoho.js (your
 // proven smart-delta-cache version) does all the list/detail/approver work.
 
-import { getPendingBills, getPODetail, getPendingPOs } from '../../lib/zoho';
+import { getPendingBills, getCachedPODetail, getPendingPOs } from '../../lib/zoho';
 import { generatePFB, checkPOAlignment } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runBillCompliance, getComplianceStatus } from '../../lib/checklistEngine';
@@ -104,7 +104,7 @@ export default async function handler(req, res) {
       }
       let linkedPO = null;
       if (linkedPORef?.purchaseorder_id) {
-        try { linkedPO = await getPODetail(linkedPORef.purchaseorder_id); } catch { linkedPO = null; }
+        try { linkedPO = await getCachedPODetail(linkedPORef.purchaseorder_id); } catch { linkedPO = null; }
       }
       const noPOExpected = !linkedPORef && isExpectedNoPOItem(lineItems);
 
