@@ -126,9 +126,23 @@ export default async function handler(req, res) {
       listCache = { pending: allPending, fetchedAt: Date.now() };
       console.log(`PMOs: fetched ${allPending.length} pending across pages`);
 
+      // Same conservative pre-filter as lib/zoho.js: if the list-level
+      // record already includes a usable approvers_list, skip detail
+      // calls for anything it clearly shows isn't Jatin's. If
+      // approvers_list isn't present at the list level for this module,
+      // every item is kept and detail-checked exactly as before — this
+      // can only reduce wasted calls, never hide a real pending item.
+      const relevantPending = allPending.filter(r =>
+        !Array.isArray(r.approvers_list) || isJatinCurrentApprover(r)
+      );
+      const skipped = allPending.length - relevantPending.length;
+      if (skipped > 0) {
+        console.log(`PMOs: ${skipped} confirmed not Jatin's at list level (skipped), ${relevantPending.length} to actually check`);
+      }
+
       detailed = [];
-      for (let i = 0; i < allPending.length; i += 10) {
-        const batch   = allPending.slice(i, i + 10);
+      for (let i = 0; i < relevantPending.length; i += 10) {
+        const batch   = relevantPending.slice(i, i + 10);
         const results = await Promise.all(batch.map(async r => {
           const id       = r.module_record_id;
           const modified = r.last_modified_time || '';
@@ -146,11 +160,14 @@ export default async function handler(req, res) {
           }
         }));
         detailed.push(...results.filter(Boolean));
-        if (i + 10 < allPending.length) await new Promise(r => setTimeout(r, 300));
+        if (i + 10 < relevantPending.length) await new Promise(r => setTimeout(r, 300));
       }
 
-      // Drop cached records no longer in the live pending list (approved/rejected)
-      const currentIds = new Set(allPending.map(r => r.module_record_id));
+      // Drop cached records no longer in the live, Jatin-relevant pending
+      // list (approved/rejected, OR now confirmed to belong to someone
+      // else) — this is also what shrinks an existing bloated cache back
+      // down once this runs.
+      const currentIds = new Set(relevantPending.map(r => r.module_record_id));
       for (const id of Object.keys(detailCache.records)) {
         if (!currentIds.has(id)) { delete detailCache.records[id]; delete detailCache.snapshot[id]; }
       }
