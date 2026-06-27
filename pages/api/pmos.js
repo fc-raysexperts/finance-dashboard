@@ -105,13 +105,14 @@ export default async function handler(req, res) {
     await hydrateFromPersistedStore();
 
     let detailed;
+    let allPending = [];
 
     if (!forceRefresh && Object.keys(detailCache.records).length > 0) {
       // Normal page load: serve straight from the persisted cache, zero Zoho calls
       detailed = Object.values(detailCache.records);
+      allPending = detailed; // for the debug field below — no separate list-fetch happened on this path
       console.log(`PMOs: cache hit — ${detailed.length} records, no Zoho calls`);
     } else {
-      let allPending = [];
       let page = 1;
       while (true) {
         const data    = await zohoGET(`/${PMO_MODULE}`, { per_page: 200, page });
