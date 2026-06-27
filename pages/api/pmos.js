@@ -4,13 +4,21 @@
 // Token fetching now goes through the shared lib/zohoToken.js (also used
 // by lib/zoho.js and project-financials.js) instead of its own private
 // cache — that 3-separate-caches setup was the actual cause of the
-// repeating 401 after idle periods. Nothing else in this file changes;
-// PMOs still use their own zohoGET wrapper for the cm_payment_memos
-// module, since that's a different Zoho module than POs/Bills.
+// repeating 401 after idle periods. PMOs still use their own zohoGET
+// wrapper for the cm_payment_memos module, since that's a different Zoho
+// module than POs/Bills.
+//
+// PERSISTENCE + MANUAL-REFRESH-ONLY ADDED: same reasoning as lib/zoho.js —
+// listCache/detailCache were pure in-memory, wiped on every Vercel cold
+// start/redeploy, defeating the whole point of caching. Now persisted to
+// KV, and a normal page load serves straight from that persisted cache
+// with zero Zoho calls; a real fetch only happens when the user explicitly
+// clicks Refresh (forceRefresh) or there's no cache yet at all.
 
 import { runPMOCompliance, runPMOAlignment, getComplianceStatus } from '../../lib/checklistEngine';
 const axios = require('axios');
 const { getAccessToken } = require('../../lib/zohoToken');
+const { storeGet, storeSet, KEYS } = require('../../lib/store');
 
 const JATIN_USER_ID  = '2346113000000742107';
 const APPROVER_EMAIL = 'jatin.srivastava@raysexperts.com';
@@ -43,9 +51,26 @@ async function zohoGET(path, params = {}) {
   }
 }
 
-let listCache    = { pending: [], fetchedAt: 0 };
-const LIST_TTL   = 15 * 60 * 1000;
+let listCache     = { pending: [], fetchedAt: 0 };
 const detailCache = { records: {}, snapshot: {} };
+let hydrated      = false; // have we tried loading from KV yet, this process lifetime?
+
+async function hydrateFromPersistedStore() {
+  if (hydrated) return;
+  hydrated = true;
+  try {
+    const persisted = await storeGet(KEYS.ZOHO_DELTA_PMOS);
+    if (persisted && Object.keys(persisted.detailCache?.records || {}).length > 0) {
+      listCache   = persisted.listCache   || listCache;
+      detailCache.records  = persisted.detailCache.records  || {};
+      detailCache.snapshot = persisted.detailCache.snapshot || {};
+    }
+  } catch { /* KV unavailable — proceed with whatever's in memory */ }
+}
+
+async function persistStore() {
+  await storeSet(KEYS.ZOHO_DELTA_PMOS, { listCache, detailCache }).catch(() => {});
+}
 
 function extractFields(moduleFields) {
   const map = {};
@@ -76,12 +101,17 @@ export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    let allPending = [];
+    const forceRefresh = req.query.refresh === '1';
+    await hydrateFromPersistedStore();
 
-    if (Date.now() - listCache.fetchedAt < LIST_TTL && listCache.pending.length > 0) {
-      allPending = listCache.pending;
-      console.log(`PMOs: list cache hit — ${allPending.length} pending`);
+    let detailed;
+
+    if (!forceRefresh && Object.keys(detailCache.records).length > 0) {
+      // Normal page load: serve straight from the persisted cache, zero Zoho calls
+      detailed = Object.values(detailCache.records);
+      console.log(`PMOs: cache hit — ${detailed.length} records, no Zoho calls`);
     } else {
+      let allPending = [];
       let page = 1;
       while (true) {
         const data    = await zohoGET(`/${PMO_MODULE}`, { per_page: 200, page });
@@ -93,30 +123,38 @@ export default async function handler(req, res) {
         await new Promise(r => setTimeout(r, 200));
       }
       listCache = { pending: allPending, fetchedAt: Date.now() };
-      console.log(`PMOs: fetched ${allPending.length} pending across pages — cached 15 min`);
-    }
+      console.log(`PMOs: fetched ${allPending.length} pending across pages`);
 
-    const detailed = [];
-    for (let i = 0; i < allPending.length; i += 10) {
-      const batch   = allPending.slice(i, i + 10);
-      const results = await Promise.all(batch.map(async r => {
-        const id       = r.module_record_id;
-        const modified = r.last_modified_time || '';
-        if (detailCache.records[id] && detailCache.snapshot[id] === modified) {
-          return detailCache.records[id];
-        }
-        try {
-          const det    = await zohoGET(`/${PMO_MODULE}/${id}`);
-          const record = det.data?.module_record || det.module_record || det;
-          detailCache.records[id]  = record;
-          detailCache.snapshot[id] = modified;
-          return record;
-        } catch {
-          return r;
-        }
-      }));
-      detailed.push(...results.filter(Boolean));
-      if (i + 10 < allPending.length) await new Promise(r => setTimeout(r, 300));
+      detailed = [];
+      for (let i = 0; i < allPending.length; i += 10) {
+        const batch   = allPending.slice(i, i + 10);
+        const results = await Promise.all(batch.map(async r => {
+          const id       = r.module_record_id;
+          const modified = r.last_modified_time || '';
+          if (detailCache.records[id] && detailCache.snapshot[id] === modified) {
+            return detailCache.records[id];
+          }
+          try {
+            const det    = await zohoGET(`/${PMO_MODULE}/${id}`);
+            const record = det.data?.module_record || det.module_record || det;
+            detailCache.records[id]  = record;
+            detailCache.snapshot[id] = modified;
+            return record;
+          } catch {
+            return r;
+          }
+        }));
+        detailed.push(...results.filter(Boolean));
+        if (i + 10 < allPending.length) await new Promise(r => setTimeout(r, 300));
+      }
+
+      // Drop cached records no longer in the live pending list (approved/rejected)
+      const currentIds = new Set(allPending.map(r => r.module_record_id));
+      for (const id of Object.keys(detailCache.records)) {
+        if (!currentIds.has(id)) { delete detailCache.records[id]; delete detailCache.snapshot[id]; }
+      }
+
+      await persistStore();
     }
 
     const jatinPMOs = detailed.filter(isJatinCurrentApprover);

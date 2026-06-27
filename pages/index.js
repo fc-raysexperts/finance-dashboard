@@ -809,14 +809,13 @@ function PFBDisplay({ proj, data, onClose }) {
 // ----- PROJECT DETAIL MODAL -- item 3 (live financials + Refresh) + item 9 (Modify/Add Zoho Names) -----
 function ProjectDetailModal({ proj, parkNames, onClose, onProjUpdated }) {
   const [financials, setFinancials] = useState(null);
-  const [loadingFin, setLoadingFin] = useState(false);
-  const [finRequested, setFinRequested] = useState(false);
+  const [loadingFin, setLoadingFin] = useState(true);
   const [showEditNames, setShowEditNames] = useState(false);
   const [showEditProject, setShowEditProject] = useState(false);
   const [localProj, setLocalProj] = useState(proj);
 
   const fetchFinancials = useCallback(async (forceRefresh) => {
-    setLoadingFin(true); setFinRequested(true);
+    setLoadingFin(true);
     try {
       const zn = encodeURIComponent(JSON.stringify(localProj.zohoNames || []));
       const ad = localProj.agreementDate ? '&agreementDate=' + encodeURIComponent(localProj.agreementDate) : '';
@@ -828,13 +827,12 @@ function ProjectDetailModal({ proj, parkNames, onClose, onProjUpdated }) {
     setLoadingFin(false);
   }, [localProj]);
 
-  // NOTE: this used to auto-fetch the moment the popup opened. On a cache
-  // miss that endpoint can cost hundreds of Zoho API calls for a SINGLE
-  // project (full pagination + a detail-fetch for every PO/Bill/Invoice/SO/CN
-  // since the agreement date) — auto-firing it on every popup open is what
-  // burned through an entire day's 10,000-call quota from just checking a
-  // few projects once. It's now opt-in only, behind an explicit button below,
-  // until this is rebuilt against Zoho Analytics instead (see chat).
+  // Auto-fetches on open again — safe now. This reads from Zoho Analytics
+  // (a completely separate, already-cached, 4-hour-shared-across-every-
+  // project pull), not the expensive direct-Books-summing this used to do.
+  // The old opt-in "Load Totals" gate and cost warning were specific to
+  // that old, expensive path and no longer apply.
+  useEffect(() => { fetchFinancials(false); }, [fetchFinancials]);
 
   const handleNamesSaved = async () => {
     try {
@@ -909,24 +907,11 @@ function ProjectDetailModal({ proj, parkNames, onClose, onProjUpdated }) {
 
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
           <div style={{fontSize:11,fontWeight:700,color:'#0f172a',letterSpacing:'0.08em'}}>PROJECT DETAILS - TOTAL AMOUNTS</div>
-          {finRequested && (
-            <button onClick={function(){fetchFinancials(true);}} disabled={loadingFin}
-              style={{background:'#f8fafc',color:'#475569',border:'1px solid #e2e8f0',borderRadius:6,padding:'4px 11px',cursor:'pointer',fontSize:11,fontWeight:600}}>
-              {loadingFin?'Refreshing...':'\u{1F504} Refresh'}
-            </button>
-          )}
+          <button onClick={function(){fetchFinancials(true);}} disabled={loadingFin}
+            style={{background:'#f8fafc',color:'#475569',border:'1px solid #e2e8f0',borderRadius:6,padding:'4px 11px',cursor:'pointer',fontSize:11,fontWeight:600}}>
+            {loadingFin?'Refreshing...':'\u{1F504} Refresh'}
+          </button>
         </div>
-        {!finRequested ? (
-          <div style={{background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:10,padding:'14px 16px',marginBottom:16,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12}}>
-            <div style={{fontSize:12,color:'#92400e'}}>
-              Loading POs/Bills/Invoices/SOs/CNs totals for this project can cost a lot of Zoho API calls on the first check of the day (shared with the rest of the team) — click only when you actually need these numbers.
-            </div>
-            <button onClick={function(){fetchFinancials(false);}}
-              style={{background:'#c2410c',color:'#fff',border:'none',borderRadius:7,padding:'8px 16px',cursor:'pointer',fontSize:12,fontWeight:700,whiteSpace:'nowrap'}}>
-              Load Totals
-            </button>
-          </div>
-        ) : (
         <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:16}}>
           {metricCards.map(function(card){
             const k = card[0], v = card[1], bg = card[2], c = card[3];
@@ -938,7 +923,6 @@ function ProjectDetailModal({ proj, parkNames, onClose, onProjUpdated }) {
             );
           })}
         </div>
-        )}
 
         <div style={{background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:8,padding:'10px 14px',marginBottom:14}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
@@ -1262,10 +1246,10 @@ export default function Dashboard() {
   const [errors,       setErrors]     = useState({});
   const [showUpdateRates, setShowUpdateRates] = useState(false);
 
-  const fetchPOs = useCallback(async function(){
+  const fetchPOs = useCallback(async function(forceRefresh){
     setLoading(function(p){ return Object.assign({},p,{pos:true}); });
     try {
-      const r = await fetch('/api/pos');
+      const r = await fetch('/api/pos' + (forceRefresh ? '?refresh=1' : ''));
       const d = await r.json();
       if (d.success) { setPOs(d.data); setLastSync(new Date()); setErrors(function(p){ return Object.assign({},p,{pos:null}); }); }
       else setErrors(function(p){ return Object.assign({},p,{pos:d.error||'Failed to load POs'}); });
@@ -1273,10 +1257,10 @@ export default function Dashboard() {
     setLoading(function(p){ return Object.assign({},p,{pos:false}); });
   }, []);
 
-  const fetchBills = useCallback(async function(){
+  const fetchBills = useCallback(async function(forceRefresh){
     setLoading(function(p){ return Object.assign({},p,{bills:true}); });
     try {
-      const r = await fetch('/api/bills');
+      const r = await fetch('/api/bills' + (forceRefresh ? '?refresh=1' : ''));
       const d = await r.json();
       if (d.success) { setBills(d.data); setErrors(function(p){ return Object.assign({},p,{bills:null}); }); }
       else setErrors(function(p){ return Object.assign({},p,{bills:d.error||'Failed to load Bills'}); });
@@ -1284,10 +1268,10 @@ export default function Dashboard() {
     setLoading(function(p){ return Object.assign({},p,{bills:false}); });
   }, []);
 
-  const fetchPMOs = useCallback(async function(){
+  const fetchPMOs = useCallback(async function(forceRefresh){
     setLoading(function(p){ return Object.assign({},p,{pmos:true}); });
     try {
-      const r = await fetch('/api/pmos');
+      const r = await fetch('/api/pmos' + (forceRefresh ? '?refresh=1' : ''));
       const d = await r.json();
       if (d.success) { setPMOs(d.data); setErrors(function(p){ return Object.assign({},p,{pmos:null}); }); }
       else setErrors(function(p){ return Object.assign({},p,{pmos:d.error||'Failed to load PMOs'}); });
@@ -1345,8 +1329,12 @@ export default function Dashboard() {
   };
 
   useEffect(function(){
-    fetchPOs(); fetchBills(); fetchPMOs(); fetchProjects();
-    const iv = setInterval(function(){ fetchPOs(); fetchBills(); fetchPMOs(); }, 15*60*1000);
+    // Page load/reload: serve from whatever's cached server-side — this
+    // costs zero Zoho calls once a cache exists (see lib/zoho.js / pmos.js).
+    // Only the Refresh button (forceRefresh=true) or this 24-hour timer
+    // actually pulls fresh data from Zoho.
+    fetchPOs(false); fetchBills(false); fetchPMOs(false); fetchProjects();
+    const iv = setInterval(function(){ fetchPOs(true); fetchBills(true); fetchPMOs(true); }, 24*60*60*1000);
     return function(){ clearInterval(iv); };
   }, [fetchPOs, fetchBills, fetchPMOs, fetchProjects]);
 
@@ -1462,7 +1450,7 @@ export default function Dashboard() {
             {['pos','bills','pmos'].indexOf(tab)>=0 && (
               <>
                 {tab!=='pmos' && <button onClick={function(){setSearch(tab==='bills'?'bill':'po');}} style={{background:'#f8fafc',color:'#475569',border:'1px solid #e2e8f0',borderRadius:7,padding:'5px 11px',cursor:'pointer',fontSize:12}}>Search</button>}
-                <button onClick={function(){ if(tab==='pos') fetchPOs(); else if(tab==='bills') fetchBills(); else fetchPMOs(); }} style={{background:'#f8fafc',color:'#475569',border:'1px solid #e2e8f0',borderRadius:7,padding:'5px 11px',cursor:'pointer',fontSize:12}}>{'\u{1F504} Refresh'}</button>
+                <button onClick={function(){ if(tab==='pos') fetchPOs(true); else if(tab==='bills') fetchBills(true); else fetchPMOs(true); }} style={{background:'#f8fafc',color:'#475569',border:'1px solid #e2e8f0',borderRadius:7,padding:'5px 11px',cursor:'pointer',fontSize:12}}>{'\u{1F504} Refresh'}</button>
               </>
             )}
             {tab==='pfbs' && (
@@ -1487,7 +1475,7 @@ export default function Dashboard() {
 
           {tab==='pos' && (
             <div className="fade">
-              <ErrorBanner message={errors.pos} onRetry={fetchPOs}/>
+              <ErrorBanner message={errors.pos} onRetry={function(){fetchPOs(true);}}/>
               {loading.pos ? <Spinner label="Loading POs from Zoho Books..."/> : (
                 <div style={{background:'#fff',borderRadius:12,border:'1px solid #e2e8f0',overflow:'hidden',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
                   <div style={{overflowX:'auto'}}>
@@ -1522,7 +1510,7 @@ export default function Dashboard() {
 
           {tab==='bills' && (
             <div className="fade">
-              <ErrorBanner message={errors.bills} onRetry={fetchBills}/>
+              <ErrorBanner message={errors.bills} onRetry={function(){fetchBills(true);}}/>
               {loading.bills ? <Spinner label="Loading Bills from Zoho Books..."/> : (
                 <div style={{background:'#fff',borderRadius:12,border:'1px solid #e2e8f0',overflow:'hidden',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
                   <div style={{overflowX:'auto'}}>
@@ -1558,7 +1546,7 @@ export default function Dashboard() {
 
           {tab==='pmos' && (
             <div className="fade">
-              <ErrorBanner message={errors.pmos} onRetry={fetchPMOs}/>
+              <ErrorBanner message={errors.pmos} onRetry={function(){fetchPMOs(true);}}/>
               {loading.pmos ? <Spinner label="Loading Payment Memos from Zoho... (first load can take about 1 minute)"/> : (
                 pmos.length===0 ? (
                   !errors.pmos && <div style={{background:'#fff',borderRadius:12,border:'1px solid #e2e8f0',padding:'48px',textAlign:'center'}}>

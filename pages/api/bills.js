@@ -68,12 +68,18 @@ export default async function handler(req, res) {
       ...p, zohoNames: [...(p.zohoNames || []), ...(zohoNameOvr[p.id] || [])]
     }));
 
-    // 1. Fetch all bills pending Jatin's approval (smart delta cache — see lib/zoho.js)
-    const bills = await getPendingBills();
+    // 1. Fetch all bills pending Jatin's approval (smart delta cache — see
+    // lib/zoho.js). forceRefresh is only true when the user explicitly
+    // clicked Refresh; a normal page load serves from the persisted cache
+    // with zero Zoho calls.
+    const forceRefresh = req.query.refresh === '1';
+    const bills = await getPendingBills(forceRefresh);
     console.log(`bills: ${bills.length} currently pending Jatin's approval`);
 
-    // Recent PO numbers, for verifying a text-matched reference is real
-    // (reuses getPendingPOs()'s own cache — no extra Zoho calls)
+    // Recent PO numbers, for verifying a text-matched reference is real —
+    // always cache-only here regardless of the Bills refresh, since this
+    // is just a minor verification fallback, not worth forcing a POs
+    // refresh as a side effect of refreshing Bills.
     let recentPONumbers = [];
     try {
       const pos = await getPendingPOs();

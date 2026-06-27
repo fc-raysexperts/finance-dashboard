@@ -29,8 +29,11 @@ export default async function handler(req, res) {
 
     // getPendingPOs() does its own list-fetch, delta-detail-cache, and
     // approver-filtering internally — what comes back is already exactly
-    // Jatin's own pending queue, nothing more.
-    const pos = await getPendingPOs();
+    // Jatin's own pending queue, nothing more. forceRefresh is only true
+    // when the user explicitly clicked Refresh; a normal page load serves
+    // from the persisted cache with zero Zoho calls.
+    const forceRefresh = req.query.refresh === '1';
+    const pos = await getPendingPOs(forceRefresh);
     console.log(`pos: ${pos.length} currently pending Jatin's approval`);
 
     const enriched = pos.map(po => {
