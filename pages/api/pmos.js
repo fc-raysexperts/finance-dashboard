@@ -107,62 +107,75 @@ export default async function handler(req, res) {
     await hydrateFromPersistedStore();
 
     let detailed;
-    let allPending = [];
 
     if (!forceRefresh && Object.keys(checkedSnapshot).length > 0) {
       // Normal page load: serve straight from the persisted cache, zero Zoho calls
       detailed = Object.values(detailCache);
-      allPending = detailed; // for the debug field below — no list-fetch happened on this path
       console.log(`PMOs: cache hit — ${detailed.length} records, no Zoho calls`);
     } else {
+      // KEY FIX: confirmed via real production logs that this account's
+      // custom-module API returns its FULL history (created_time sorted,
+      // descending) with no way to filter server-side by approval status
+      // — meaning every refresh was scanning every PMO record that has
+      // EVER existed (2,589+ and growing) just to find the ~84 currently
+      // pending ones.
+      //
+      // Sorting by last_modified_time DESCENDING instead fixes this: any
+      // record that's new, edited, OR just approved/rejected gets its
+      // modified time bumped to right now, so it always sorts before
+      // anything genuinely untouched since the last check. That means we
+      // can stop paginating the SECOND we hit a record we already know
+      // about at the exact same modified time — everything after that
+      // point (older modified time) must also still be unchanged, by
+      // definition. Normal day-to-day activity should now cost roughly
+      // 1 page instead of 13.
+      //
+      // One known, accepted trade-off: a PMO record that's hard-deleted
+      // (not approved/rejected, actually deleted) wouldn't bump anything's
+      // modified time, so its tiny leftover marker could linger
+      // harmlessly in the cache rather than being pruned immediately —
+      // a few bytes, not a real cost, and self-corrects if it ever gets
+      // touched again.
+      const toFetch = [];
       let page = 1;
+      let stoppedEarly = false;
+      let scannedCount = 0;
       while (true) {
-        const data    = await zohoGET(`/${PMO_MODULE}`, { per_page: 200, page });
-        const recs    = data.module_records || [];
-        const pending = recs.filter(r => r.status === 'pending_approval');
-        allPending    = allPending.concat(pending);
-        // Diagnostic: confirming whether this custom module's API actually
-        // honors per_page=200, or silently caps it lower — if it caps it,
-        // genuinely needing several list calls for ~84 records would be a
-        // hard Zoho-side limit, not a bug in this code.
-        console.log(`PMOs: page ${page} returned ${recs.length} records (requested per_page=200), has_more_page=${data.page_context?.has_more_page}, page_context=${JSON.stringify(data.page_context)}`);
-        if (!data.page_context?.has_more_page) break;
+        const data = await zohoGET(`/${PMO_MODULE}`, { per_page: 200, page, sort_column: 'last_modified_time', sort_order: 'D' });
+        const recs = data.module_records || [];
+        scannedCount += recs.length;
+
+        for (const r of recs) {
+          const id       = r.module_record_id;
+          const modified = r.last_modified_time || '';
+          const checked  = checkedSnapshot[id];
+          if (checked && checked.modified === modified) {
+            stoppedEarly = true;
+            break; // this, and everything older after it, is already known and unchanged
+          }
+          toFetch.push(r);
+        }
+
+        if (stoppedEarly || !data.page_context?.has_more_page) break;
         page++;
         await new Promise(r => setTimeout(r, 200));
       }
-      console.log(`PMOs: fetched ${allPending.length} pending across pages`);
-
-      // Find what's new or changed SINCE WE LAST CHECKED IT — not just
-      // since it was last confirmed as Jatin's. Confirmed via production
-      // logs that this account's list response doesn't expose a usable
-      // approver field, so every item's status can only be known via its
-      // detail — but once checked, that result (yes OR no) is remembered
-      // permanently via the tiny marker below, so company-wide activity
-      // that has nothing to do with Jatin's queue only ever costs once
-      // per item, never again, no matter how many times it's refreshed.
-      const toFetch    = [];
-      const currentIds = new Set();
-      for (const r of allPending) {
-        const id       = r.module_record_id;
-        const modified = r.last_modified_time || '';
-        currentIds.add(id);
-        const checked = checkedSnapshot[id];
-        if (checked && checked.modified === modified) continue; // already known, skip
-        toFetch.push(r);
-      }
-
-      // Drop anything no longer in the live list at all (approved/rejected)
-      for (const id of Object.keys(checkedSnapshot)) {
-        if (!currentIds.has(id)) { delete checkedSnapshot[id]; delete detailCache[id]; }
-      }
+      console.log(`PMOs: scanned ${scannedCount} records (stopped ${stoppedEarly ? 'early, hit already-known unchanged record' : 'at end of list'}), ${toFetch.length} new/changed to check`);
 
       if (toFetch.length > 0) {
-        console.log(`PMOs: ${allPending.length} pending company-wide, ${toFetch.length} new/changed since last check`);
         for (let i = 0; i < toFetch.length; i += 10) {
           const batch = toFetch.slice(i, i + 10);
           await Promise.all(batch.map(async r => {
             const id       = r.module_record_id;
             const modified = r.last_modified_time || '';
+            // Only PMOs (status === 'pending_approval') matter at all —
+            // anything else just gets a tiny "checked, not relevant"
+            // marker so it's instantly skippable if seen again.
+            if (r.status !== 'pending_approval') {
+              checkedSnapshot[id] = { modified, isJatin: false };
+              delete detailCache[id];
+              return;
+            }
             try {
               const det     = await zohoGET(`/${PMO_MODULE}/${id}`);
               const record  = det.data?.module_record || det.module_record || det;
@@ -174,8 +187,6 @@ export default async function handler(req, res) {
           }));
           if (i + 10 < toFetch.length) await new Promise(r => setTimeout(r, 300));
         }
-      } else {
-        console.log(`PMOs: ${allPending.length} pending company-wide, 0 changed since last check — using cache`);
       }
 
       await persistStore();
@@ -263,7 +274,7 @@ export default async function handler(req, res) {
       success: true,
       count:   enriched.length,
       data:    enriched,
-      debug: { pending: allPending.length, jatin: jatinPMOs.length },
+      debug: { pending: detailed.length, jatin: jatinPMOs.length },
     });
 
   } catch (err) {
