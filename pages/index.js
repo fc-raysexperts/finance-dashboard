@@ -10,7 +10,7 @@
 // 8. Tag-based 3-tier PFB alignment matching (handled server-side in pfbEngine.js)
 // 9. Editable Zoho Books Project Names via nested modal
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
 import Head from 'next/head';
 import * as XLSX from 'xlsx';
 
@@ -33,6 +33,17 @@ function extractCode(name) {
 }
 const fmtCr = n => n == null ? String.fromCharCode(8212) : '\u20b9' + Number(n).toFixed(2) + ' Cr';
 
+// Same DD-MM-YYYY comparator pattern as the backend's sortByEndDateDesc -
+// used for the PFB tab's project cells (item 6).
+function sortByEndDateDescClient(arr) {
+  const toComp = d => (d || '').split('-').reverse().join('-');
+  return (arr||[]).slice().sort(function(a,b){
+    if (!a.endDate) return 1;
+    if (!b.endDate) return -1;
+    return toComp(b.endDate).localeCompare(toComp(a.endDate));
+  });
+}
+
 function toIndianDate(d) {
   if (!d) return String.fromCharCode(8212);
   try {
@@ -42,15 +53,24 @@ function toIndianDate(d) {
     return String(dt.getDate()).padStart(2,'0') + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + dt.getFullYear();
   } catch (e) { return d; }
 }
+// Point 6: dates should always show as DD-MM-YYYY with dashes, never
+// slashes. A few places show endDate/agreementDate as already-formatted
+// text straight from storage rather than passing through toIndianDate
+// above — this normalizes any slash-separated date to dashes at display
+// time, without needing to touch (or risk changing the meaning of) the
+// underlying stored value itself.
+function dashDate(d) {
+  return d ? String(d).replace(/\//g, '-') : d;
+}
 
 // ----- RATE/Wp COLOR CLASSIFICATION (PFBs tab legend) -----
 // green < 25, yellow 25-30, orange 30-35, red >= 35 (Rs./Wp)
 function rateColor(ratePerWp) {
   if (ratePerWp == null) return { bg:'#cbd5e1', c:'#334155', label:String.fromCharCode(8212) };
-  if (ratePerWp < 25) return { bg:'#4ade80', c:'#052e16', label:'Good' };
-  if (ratePerWp < 30) return { bg:'#fbbf24', c:'#451a03', label:'Watch' };
-  if (ratePerWp < 35) return { bg:'#fb923c', c:'#431407', label:'High' };
-  return { bg:'#f87171', c:'#450a0a', label:'Over' };
+  if (ratePerWp < 25) return { bg:'#22c55e', c:'#fff', label:'Good' };
+  if (ratePerWp < 30) return { bg:'#eab308', c:'#fff', label:'Watch' };
+  if (ratePerWp < 35) return { bg:'#f97316', c:'#fff', label:'High' };
+  return { bg:'#ef4444', c:'#fff', label:'Over' };
 }
 
 // ----- BADGES -----
@@ -70,18 +90,13 @@ function RecBadge({ d }) {
   return <span style={{background:v.bg,color:v.c,padding:'3px 10px',borderRadius:4,fontSize:11,fontWeight:700,border:'1px solid ' + v.c + '33'}}>{d||String.fromCharCode(8212)}</span>;
 }
 
-// ----- PROJECT CODES DISPLAY (item 6 fix) -----
+// ----- PROJECT NAMES DISPLAY (item 6 fix - full official names, no truncation) -----
 function ProjectCodes({ names }) {
   if (!names || !names.length) return <span style={{color:'#94a3b8'}}>{String.fromCharCode(8212)}</span>;
-  const codes = names.map(n => {
-    const m = n.match(/LE\d{4}/i);
-    return m ? m[0] : (n.split('_')[0] || n).substring(0,14);
-  });
-  const unique = [...new Set(codes)];
+  const unique = [...new Set(names)];
   return (
-    <span style={{fontSize:11,color:'#2563eb',display:'flex',flexDirection:'column',gap:1}}>
-      {unique.slice(0,2).map((c,i) => <span key={i}>{c}</span>)}
-      {unique.length>2 && <span style={{color:'#94a3b8'}}>+{unique.length-2} more</span>}
+    <span style={{fontSize:11,color:'#2563eb',display:'flex',flexDirection:'column',gap:1,wordBreak:'break-word'}}>
+      {unique.map((n,i) => <span key={i}>{n}{i<unique.length-1?',':''}</span>)}
     </span>
   );
 }
@@ -148,11 +163,65 @@ function InfoGrid({ fields, cols }) {
         const k = pair[0], v = pair[1];
         return (
           <div key={k}>
-            <div style={{fontSize:10,color:'#94a3b8',fontWeight:700,letterSpacing:'0.08em',marginBottom:2}}>{k.toUpperCase()}</div>
-            <div style={{fontSize:13,color:'#0f172a',fontWeight:500,wordBreak:'break-word'}}>{v==null?String.fromCharCode(8212):v}</div>
+            <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,letterSpacing:'0.08em',marginBottom:2}}>{k.toUpperCase()}</div>
+            <div style={{fontSize:14,color:'#0f172a',fontWeight:500,wordBreak:'break-word'}}>{v==null?String.fromCharCode(8212):v}</div>
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Same visual style as InfoGrid, but each row can use its own column
+// ratio (e.g. '3fr 7fr') instead of one fixed equal-width count — needed
+// for rows like PI/Bill Attachment + Payment Terms sharing space
+// unevenly, followed by Remarks taking the full row alone.
+function InfoGridCustom({ rows }) {
+  return (
+    <div style={{background:'#f8fafc',borderRadius:10,padding:'14px 18px',marginBottom:16}}>
+      {rows.map(function(row, ri){
+        return (
+          <div key={ri} style={{display:'grid',gridTemplateColumns:row.template,gap:'10px 20px',marginTop:ri>0?10:0}}>
+            {row.items.map(function(pair){
+              const k = pair[0], v = pair[1];
+              return (
+                <div key={k}>
+                  <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,letterSpacing:'0.08em',marginBottom:2}}>{k.toUpperCase()}</div>
+                  <div style={{fontSize:14,color:'#0f172a',fontWeight:500,wordBreak:'break-word'}}>{v==null?String.fromCharCode(8212):v}</div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Truncates long text (Notes, Terms & Conditions) to ~20 words with
+// "....." — clicking opens a nested modal (stacked above the current one
+// via a higher z-index) showing the full text, so nothing long ever gets
+// silently cut off from view.
+function ExpandableText({ label, text, onExpandFull }) {
+  const [expanded, setExpanded] = useState(false);
+  const PREVIEW_WORDS = 22;   // default preview length (~20-25 words requested)
+  const INLINE_MAX     = 45;  // beyond this, inline expansion would take up too much space - use a popup instead
+  const words = (text || '').trim().split(/\s+/).filter(Boolean);
+  const isLong    = words.length > PREVIEW_WORDS;
+  const useInline = words.length <= INLINE_MAX;
+  const preview   = isLong ? words.slice(0, PREVIEW_WORDS).join(' ') + ' .....' : (text || String.fromCharCode(8212));
+  return (
+    <div>
+      <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,letterSpacing:'0.08em',marginBottom:2}}>{label.toUpperCase()}</div>
+      <div style={{fontSize:14,color:'#0f172a',fontWeight:500,wordBreak:'break-word',whiteSpace:'pre-wrap',lineHeight:1.6}}>
+        {(expanded && useInline) ? text : preview}
+      </div>
+      {isLong && (
+        <button onClick={function(){ if (useInline) setExpanded(function(e){return !e;}); else if (onExpandFull) onExpandFull(); }}
+          style={{background:'none',border:'none',color:'#2563eb',fontWeight:700,fontSize:12,cursor:'pointer',padding:0,marginTop:4}}>
+          {useInline ? (expanded ? 'Show less' : 'Read more') : 'Read more'}
+        </button>
+      )}
     </div>
   );
 }
@@ -209,35 +278,68 @@ function CompTable({ checks, title }) {
   );
 }
 
-// ----- LINE CHECKS TABLE (shows match tier from item 8) -----
-function LineTable({ checks, title }) {
+// ----- DIRECTION-AWARE STATUS BADGE (shared by both new comparison tables) -----
+// Real bug this replaces: the old single "Over Budget"/"Variance" status
+// ignored direction entirely, so a rate BELOW the reference (favorable)
+// showed the exact same "Over Budget" label as one ABOVE it.
+function statusWord(status) {
+  if (status === 'over_severe' || status === 'over_caution') return 'High';
+  if (status === 'under_severe' || status === 'under_caution') return 'Low';
+  if (status === 'na') return 'N/A';
+  if (status === 'no_match') return 'No Match';
+  return 'OK';
+}
+function statusColor(status) {
+  if (status === 'over_severe' || status === 'over_caution') return '#dc2626'; // mid-red - High
+  if (status === 'under_severe' || status === 'under_caution') return '#ea580c'; // mid-orange - Low
+  if (status === 'na' || status === 'no_match') return '#6b7280'; // mid-grey - No Match/N/A
+  return '#16a34a'; // mid-green - OK
+}
+function StatusBadge({ status }) {
+  const c = statusColor(status);
+  return <span style={{fontSize:11,fontWeight:700,color:c}}>{statusWord(status)}</span>;
+}
+function rowTint(status) {
+  if (status === 'over_severe' || status === 'over_caution') return '#fef2f4'; // very light pink
+  if (status === 'under_severe' || status === 'under_caution') return '#fffdf0'; // very light yellow
+  if (status === 'na' || status === 'no_match') return '#f8fafc'; // very light grey
+  return '#fff'; // white - OK
+}
+
+// ----- PFB ALIGNMENT TABLE (PO or Bill line items vs PFB scope) -----
+// Replaces the old combined LineTable for this case — now shows Qty and
+// Rate compared and statused SEPARATELY (item 5 fix), so a pure qty
+// mismatch can never hide behind a confusing "0.0%" rate variance again.
+function PFBAlignmentTable({ checks, title }) {
   if (!checks || !checks.length) return null;
   const tierLabel = function(t){ return t===1?'Name match':t===2?'Tag match':t===3?'Tag+disambig':String.fromCharCode(8212); };
+  const divider = {borderRight:'1.5px solid #cbd5e1'};
   return (
     <div style={{marginBottom:20}}>
-      <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title}</h3>
+      <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title}</h3>
       <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
-        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-          <thead><tr style={{background:'#f8fafc'}}>
-            {['Item','Qty','Rate','Amount','PFB Match','Match Type','PFB Rate','Variance','Status'].map(function(h){
-              return <th key={h} style={{padding:'7px 10px',textAlign:'left',color:'#475569',fontWeight:700,fontSize:11,borderBottom:'1px solid #e2e8f0',whiteSpace:'nowrap'}}>{h}</th>;
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+          <thead><tr style={{background:'#eff6ff'}}>
+            {['Item','Qty','PFB Qty','Qty Status','Rate','PFB Rate','Rate Status','PFB Match','Match Type','Amount','Overall'].map(function(h){
+              const dividerHere = (h==='Item'||h==='Qty Status'||h==='Rate Status'||h==='Match Type') ? divider : null;
+              return <th key={h} style={Object.assign({padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'},dividerHere)}>{h}</th>;
             })}
           </tr></thead>
           <tbody>
             {checks.map(function(c,i){
               return (
-                <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:c.status==='reject'?'#fff1f2':c.status==='flag'?'#fefce8':c.status==='na'?'#f8fafc':'#fff'}}>
-                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:500,maxWidth:180}}>{c.lineItem}</td>
+                <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.status)}}>
+                  <td style={Object.assign({padding:'7px 10px',color:'#0f172a',fontWeight:500,maxWidth:160},divider)}>{c.lineItem}</td>
                   <td style={{padding:'7px 10px',color:'#475569'}}>{fmtN(c.qty)}</td>
+                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.pfbQty!=null?fmtN(c.pfbQty):String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 10px'},divider)}>{c.qtyStatus?<StatusBadge status={c.qtyStatus}/>:String.fromCharCode(8212)}</td>
                   <td style={{padding:'7px 10px',color:'#475569'}}>{fmt(c.rate)}</td>
+                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.pfbRate!=null?fmt(c.pfbRate):String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 10px'},divider)}>{c.rateStatus?<StatusBadge status={c.rateStatus}/>:String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 10px',color:'#2563eb',fontSize:12}}>{c.pfbMatch||String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 10px',color:'#7c3aed',fontSize:12},divider)}>{c.matchTier?tierLabel(c.matchTier):String.fromCharCode(8212)}</td>
                   <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:600}}>{fmt(c.amount)}</td>
-                  <td style={{padding:'7px 10px',color:'#2563eb',fontSize:11}}>{c.pfbMatch||String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',color:'#7c3aed',fontSize:11}}>{c.matchTier?tierLabel(c.matchTier):String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{fmt(c.pfbRate)}</td>
-                  <td style={{padding:'7px 10px',fontWeight:700,color:c.rateVariance>10?'#dc2626':c.rateVariance<-10?'#ea580c':'#16a34a'}}>{c.rateVariance!=null?fmtP(c.rateVariance):String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',fontSize:11,fontWeight:600,color:c.status==='reject'?'#dc2626':c.status==='flag'?'#d97706':c.status==='na'?'#94a3b8':'#16a34a'}}>
-                    {c.status==='na'?'N/A':c.status==='reject'?'Over Budget':c.status==='flag'?'Variance':'OK'}
-                  </td>
+                  <td style={{padding:'7px 10px'}}><StatusBadge status={c.status}/></td>
                 </tr>
               );
             })}
@@ -248,16 +350,130 @@ function LineTable({ checks, title }) {
   );
 }
 
+// ----- PO MATCH TABLE (Bill line items vs linked PO line items) -----
+// This is a genuinely different comparison than the PFB table above (two
+// real documents being compared, not one document against a budget
+// reference) — it was previously squeezed into the same table component
+// despite using completely different field names (billQty/poQty vs
+// qty/pfbQty), which is why Status showed but every other column was
+// silently blank.
+function POMatchTable({ checks, title }) {
+  if (!checks || !checks.length) return null;
+  const divider = {borderRight:'1.5px solid #cbd5e1'};
+  return (
+    <div style={{marginBottom:20}}>
+      <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title}</h3>
+      <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+          <thead><tr style={{background:'#eff6ff'}}>
+            {['Item','Bill Qty','PO Qty','Qty Status','Bill Rate','PO Rate','Rate Status','Bill Amount','PO Amount','Overall'].map(function(h){
+              const dividerHere = (h==='Item'||h==='Qty Status'||h==='Rate Status') ? divider : null;
+              return <th key={h} style={Object.assign({padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'},dividerHere)}>{h}</th>;
+            })}
+          </tr></thead>
+          <tbody>
+            {checks.map(function(c,i){
+              return (
+                <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.status)}}>
+                  <td style={Object.assign({padding:'7px 10px',color:'#0f172a',fontWeight:500,maxWidth:160},divider)}>{c.lineItem}</td>
+                  <td style={{padding:'7px 10px',color:'#475569'}}>{fmtN(c.billQty)}</td>
+                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.poQty!=null?fmtN(c.poQty):String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 10px'},divider)}>{c.qtyStatus?<StatusBadge status={c.qtyStatus}/>:String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 10px',color:'#475569'}}>{fmt(c.billRate)}</td>
+                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.poRate!=null?fmt(c.poRate):String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 10px'},divider)}>{c.rateStatus?<StatusBadge status={c.rateStatus}/>:String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:600}}>{fmt(c.billAmount)}</td>
+                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.poAmount!=null?fmt(c.poAmount):String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 10px'}}><StatusBadge status={c.status}/></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ----- PO BREAKUP TABLE (PMOs only) -----
+// Built defensively: the exact field names Zoho uses for this org's PO
+// Breakup subform couldn't be confirmed without live access to a real raw
+// PMO record (it's very unlikely to be a simple custom field given it's a
+// multi-row table) — pmos.js logs the raw field/key names once per cold
+// start specifically so these can be confirmed and tightened up precisely
+// once that's visible. This reads several plausible key-name variants so
+// it has the best chance of rendering correctly even before that
+// confirmation happens, and degrades to nothing (not a crash) if the
+// shape turns out to be completely different.
+function POBreakupTable({ rows, kind }) {
+  if (!rows || !rows.length) return null;
+  const isExpense = kind === 'expense';
+  // Build the column list dynamically from whichever keys the backend
+  // actually included on these specific rows — never a fixed count, since
+  // different PMOs genuinely have different columns filled in on ZB
+  // itself (confirmed: one real PMO showed 5 PO Breakup columns, another
+  // showed all 6 Expense Breakup columns including TDS). Total is always
+  // last, matching the real screenshot's column order exactly.
+  const has = key => rows.some(r => r[key] !== undefined);
+  const cols = [
+    isExpense ? { key:'expense_detail', label:'Expense Detail' } : { key:'po_number', label:'PO Number' },
+  ];
+  if (has('basic_amount')) cols.push({ key:'basic_amount', label:'Basic Amount' });
+  if (has('tax_amount'))   cols.push({ key:'tax_amount', label:'Tax Amount' });
+  if (has('tds'))          cols.push({ key:'tds', label:'TDS' });
+  if (has('adjustment'))   cols.push({ key:'adjustment', label:'Adjustment' });
+  cols.push({ key:'total', label:'Total' });
+
+  const grandTotal = rows.reduce((s,r) => s + (Number(r.total) || 0), 0);
+
+  return (
+    <div style={{marginBottom:20}}>
+      <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>{isExpense ? 'Expense Breakup' : 'PO Breakup'}</h3>
+      <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+          <thead><tr style={{background:'#eff6ff'}}>
+            {cols.map(function(c){
+              const isLabelCol = c.key==='po_number' || c.key==='expense_detail';
+              return <th key={c.key} style={Object.assign({padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'},isLabelCol?{borderRight:'1.5px solid #cbd5e1'}:{})}>{c.label}</th>;
+            })}
+          </tr></thead>
+          <tbody>
+            {rows.map(function(r,i){
+              return (
+                <tr key={i} style={{borderBottom:'1px solid #f1f5f9'}}>
+                  {cols.map(function(c){
+                    const isLabelCol = c.key==='po_number' || c.key==='expense_detail';
+                    const val = r[c.key];
+                    return (
+                      <td key={c.key} style={Object.assign({padding:'7px 10px',color:isLabelCol?'#0f172a':'#475569',fontWeight:isLabelCol||c.key==='total'?700:400},isLabelCol?{borderRight:'1.5px solid #cbd5e1'}:{})}>
+                        {isLabelCol ? (val || String.fromCharCode(8212)) : (val!=null ? fmt(val) : String.fromCharCode(8212))}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+            <tr style={{background:'#eff6ff',borderTop:'2px solid #dbeafe'}}>
+              <td colSpan={cols.length-1} style={{padding:'8px 10px',color:'#1e40af',fontWeight:700,fontSize:12,textAlign:'right'}}>{'Total Amount against ' + (isExpense?'Expense':'PO')}</td>
+              <td style={{padding:'8px 10px',color:'#0f172a',fontWeight:800}}>{fmt(grandTotal)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ----- SUMMARY CARD -----
 function Card({ label, value, sub, color, icon }) {
   return (
-    <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,padding:'14px 18px',borderTop:'3px solid ' + (color||'#e2e8f0')}}>
+    <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,padding:'14px 18px',borderTop:'3px solid ' + (color||'#e2e8f0'),overflow:'hidden',minWidth:0}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
-        <div style={{fontSize:10,color:'#94a3b8',fontWeight:700,letterSpacing:'0.08em'}}>{label}</div>
-        {icon&&<span style={{fontSize:16}}>{icon}</span>}
+        <div style={{fontSize:10,color:'#94a3b8',fontWeight:700,letterSpacing:'0.08em',lineHeight:1.3}}>{label}</div>
+        {icon&&<span style={{fontSize:18,lineHeight:1,flexShrink:0,marginLeft:6}}>{icon}</span>}
       </div>
       <div style={{fontSize:26,fontWeight:900,color:'#0f172a',margin:'5px 0 2px',letterSpacing:'-0.02em'}}>{value}</div>
-      {sub&&<div style={{fontSize:11,color:'#64748b'}}>{sub}</div>}
+      {sub&&<div style={{fontSize:11,color:'#64748b',lineHeight:1.3}}>{sub}</div>}
     </div>
   );
 }
@@ -763,7 +979,13 @@ function PFBDisplay({ proj, data, onClose }) {
           <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,marginBottom:2}}>TOTAL BUDGET AMOUNT</div>
           <div style={{fontSize:24,fontWeight:900,color:'#0f172a'}}>{fmt(total)}</div>
           <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,marginTop:8,marginBottom:2}}>RATE OF PROJECT</div>
-          <div style={{fontSize:16,fontWeight:700,color:'#1d4ed8'}}>{'\u20b9' + (data && data.ratePerWp ? data.ratePerWp.toFixed(2) : String.fromCharCode(8212)) + '/Wp'}</div>
+          <div style={{display:'inline-flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:16,fontWeight:700,color:'#0f172a'}}>{'\u20b9' + (data && data.ratePerWp ? data.ratePerWp.toFixed(2) : String.fromCharCode(8212)) + '/Wp'}</span>
+            {data && data.ratePerWp != null && (function(){
+              const rc = rateColor(data.ratePerWp);
+              return <span style={{background:rc.bg,color:rc.c,fontSize:11,fontWeight:700,padding:'2px 9px',borderRadius:5}}>{rc.label}</span>;
+            })()}
+          </div>
         </div>
         <button onClick={download} style={{background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:8,padding:'8px 16px',cursor:'pointer',fontSize:12,fontWeight:700}}>Download CSV</button>
       </div>
@@ -893,7 +1115,7 @@ function ProjectDetailModal({ proj, parkNames, onClose, onProjUpdated }) {
               ['PFB Total', localProj.pfbTotal?fmt(localProj.pfbTotal):'Not generated'],
               ['Rate / Wp', localProj.ratePerWp?('\u20b9' + localProj.ratePerWp.toFixed(2) + '/Wp'):String.fromCharCode(8212)],
               ['Agreement Date', localProj.agreementDate||String.fromCharCode(8212)],
-              ['End Date', localProj.endDate||String.fromCharCode(8212)],
+              ['End Date', dashDate(localProj.endDate)||String.fromCharCode(8212)],
             ].map(function(pair){
               const k = pair[0], v = pair[1];
               return (
@@ -933,8 +1155,8 @@ function ProjectDetailModal({ proj, parkNames, onClose, onProjUpdated }) {
             </button>
           </div>
           <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
-            {(localProj.zohoNames||[]).map(function(n){
-              return <span key={n} style={{background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:5,padding:'2px 8px',fontSize:12}}>{n}</span>;
+            {(localProj.zohoNames||[]).map(function(n,i){
+              return <span key={n+'_'+i} style={{background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:5,padding:'2px 8px',fontSize:12}}>{n}</span>;
             })}
           </div>
         </div>
@@ -993,7 +1215,7 @@ function ParkModal({ park, onClose, onProjectClick, onParkUpdated }) {
       <div style={{border:'1px solid #e2e8f0',borderRadius:8,overflow:'hidden'}}>
         {park.projects.length > 0 && (
           <div style={{display:'grid',gridTemplateColumns:colTemplate,alignItems:'center',padding:'8px 14px',background:'#f8fafc',borderBottom:'1.5px solid #e2e8f0'}}>
-            {['Project Name','DC (MWp)','AC (MW)','BESS','Value','Agr. Date'].map(function(h){
+            {['Project Name','DC (MWp)','AC (MW)','BESS','Value','End Date'].map(function(h){
               return <span key={h} style={{fontSize:10,fontWeight:700,color:'#64748b',letterSpacing:'0.05em'}}>{h.toUpperCase()}</span>;
             })}
           </div>
@@ -1009,7 +1231,7 @@ function ParkModal({ park, onClose, onProjectClick, onParkUpdated }) {
               <span style={{fontSize:12,color:'#15803d'}}>{p.ac?(p.ac + ' MW'):String.fromCharCode(8212)}</span>
               <span style={{fontSize:12,color:'#a16207'}}>{p.bess?(p.bess + ' MWh'):String.fromCharCode(8212)}</span>
               <span style={{fontSize:12,color:'#0f172a',fontWeight:600}}>{fmtCr(p.totalValue)}</span>
-              <span style={{fontSize:11,color:'#64748b'}}>{p.agreementDate||String.fromCharCode(8212)}</span>
+              <span style={{fontSize:11,color:'#64748b'}}>{dashDate(p.endDate)||String.fromCharCode(8212)}</span>
             </div>
           );
         })}
@@ -1021,37 +1243,126 @@ function ParkModal({ park, onClose, onProjectClick, onParkUpdated }) {
 }
 
 // ----- LINE ITEMS TABLE -----
-function ItemsTable({ items, title }) {
+// Item name fallback: if Zoho's name field is blank (engineer typed the
+// name into the Description box by mistake instead), fall back to the
+// description — used as-is if short enough, otherwise auto-shortened to
+// a usable label, so the table never shows a blank where a name should be.
+function resolveItemName(li) {
+  if (li.name && li.name.trim()) return li.name;
+  const desc = (li.description || '').trim();
+  if (!desc) return null;
+  const words = desc.split(/\s+/);
+  return words.length <= 5 ? desc : words.slice(0, 5).join(' ') + '...';
+}
+
+function ItemsTable({ items, title, subTotal, taxes, total, discount, discountFormatted, adjustment, adjustmentDescription }) {
   if (!items || !items.length) return null;
+  const computedSubTotal = items.reduce((s, li) => s + (Number(li.item_total) || 0), 0);
+  const displaySubTotal  = subTotal != null ? subTotal : computedSubTotal;
+  const totalQty = items.reduce((s, li) => s + (Number(li.quantity) || 0), 0);
+
+  const allTaxEntries   = Array.isArray(taxes) ? taxes.filter(t => t && t.tax_amount) : [];
+  const standardTaxes   = allTaxEntries.filter(t => Number(t.tax_amount) >= 0);
+  const deductionTaxes  = allTaxEntries.filter(t => Number(t.tax_amount) < 0);
+
+  const hasDiscount   = discount != null && discount !== 0;
+  const hasAdjustment = adjustment != null && adjustment !== 0;
+
+  const row1Base = [];
+  if (hasDiscount)   row1Base.push(['Discount', discountFormatted || fmt(discount)]);
+  if (hasAdjustment) row1Base.push(['Adjustment', fmt(adjustment) + (adjustmentDescription ? ' (' + adjustmentDescription + ')' : '')]);
+  row1Base.push(['Total Quantity', fmtN(totalQty)]);
+  row1Base.push(['Sub Total', fmt(displaySubTotal)]);
+
+  const row2Base = standardTaxes.map(t => [t.tax_name || 'Tax', fmt(t.tax_amount)]);
+  row2Base.push(['Total', fmt(total!=null?total:displaySubTotal)]);
+
+  let row1Items = row1Base, row2Items = row2Base;
+  if (deductionTaxes.length > 0) {
+    const deductionPairs = deductionTaxes.map(t => [t.tax_name || 'Deduction', fmt(t.tax_amount)]);
+    if (row1Base.length < row2Base.length) row1Items = [...deductionPairs, ...row1Base];
+    else row2Items = [...deductionPairs, ...row2Base];
+  }
+
+  const itemsWithProjCode = items.map(li => ({
+    li,
+    projCode: li.project_name ? extractCode(li.project_name) : ((li.description||'').match(/LE\d{4}/i)||[])[0] || '',
+  }));
+  // Project column dropped ENTIRELY when every single row's project is
+  // blank — Location alone serves that purpose then, per the exact rule
+  // requested. Location itself is only shown when at least one row's
+  // Project is blank (unchanged from before).
+  const showProject  = itemsWithProjCode.some(x => !!x.projCode);
+  const showLocation = itemsWithProjCode.some(x => !x.projCode);
+  const showSpec = items.some(li => li.sku);
+
+  const headers = ['#','Item Name', ...(showSpec?['Specification']:[]), ...(showProject?['Project']:[]), ...(showLocation?['Location']:[]), 'Qty','Unit','Rate','Amount'];
+  const colCount = headers.length;
+  // Vertical dividers: one right after Item Name, one right before Qty —
+  // so whichever of Specification/Project/Location are actually present
+  // sit visually grouped between the two lines. Never extended into the
+  // yellow summary rows below. The second divider goes on whichever of
+  // the three optional columns is the LAST one actually present.
+  const divider = { borderRight:'1.5px solid #cbd5e1' };
+  const lastOptionalCol = showLocation ? 'location' : showProject ? 'project' : showSpec ? 'spec' : 'name';
+
   return (
     <div style={{marginBottom:20}}>
-      <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title||'Line Items'}</h3>
+      <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title||'Line Items'}</h3>
       <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
-        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-          <thead><tr style={{background:'#f8fafc'}}>
-            {['#','Item Name','Project','HSN/SAC','Qty','Unit','Rate','Amount','Tax'].map(function(h){
-              return <th key={h} style={{padding:'7px 10px',textAlign:'left',color:'#475569',fontWeight:700,fontSize:11,borderBottom:'1px solid #e2e8f0',whiteSpace:'nowrap'}}>{h}</th>;
-            })}
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+          <thead><tr style={{background:'#eff6ff'}}>
+            <th style={{padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'}}>#</th>
+            <th style={Object.assign({padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'},divider)}>Item Name</th>
+            {showSpec && <th style={Object.assign({padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'},lastOptionalCol==='spec'?divider:{})}>Specification</th>}
+            {showProject && <th style={Object.assign({padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'},lastOptionalCol==='project'?divider:{})}>Project</th>}
+            {showLocation && <th style={Object.assign({padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'},lastOptionalCol==='location'?divider:{})}>Location</th>}
+            <th style={{padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'}}>Qty</th>
+            <th style={{padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'}}>Unit</th>
+            <th style={{padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'}}>Rate</th>
+            <th style={{padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'}}>Amount</th>
           </tr></thead>
           <tbody>
-            {items.map(function(li,i){
-              const projCode = li.project_name
-                ? extractCode(li.project_name)
-                : ((li.description||'').match(/LE\d{4}/i)||[])[0] || '';
+            {itemsWithProjCode.map(function(x,i){
+              const li = x.li;
+              const displayName = resolveItemName(li);
               return (
                 <tr key={i} style={{borderBottom:'1px solid #f1f5f9'}}>
                   <td style={{padding:'6px 10px',color:'#94a3b8',fontSize:11}}>{i+1}</td>
-                  <td style={{padding:'6px 10px',color:'#0f172a',fontWeight:500,maxWidth:200}}>{compressName(li.name,5)}</td>
-                  <td style={{padding:'6px 10px',color:'#2563eb',fontSize:11,fontWeight:600}}>{projCode||String.fromCharCode(8212)}</td>
-                  <td style={{padding:'6px 10px',color:'#64748b'}}>{li.hsn_or_sac||String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'6px 10px',color:'#0f172a',fontWeight:500,maxWidth:200},divider)}>{displayName ? compressName(displayName,5) : String.fromCharCode(8212)}</td>
+                  {showSpec && <td style={Object.assign({padding:'6px 10px',color:'#7c3aed',fontSize:12},lastOptionalCol==='spec'?divider:{})}>{li.sku||String.fromCharCode(8212)}</td>}
+                  {showProject && <td style={Object.assign({padding:'6px 10px',color:'#2563eb',fontSize:11,fontWeight:600},lastOptionalCol==='project'?divider:{})}>{x.projCode||String.fromCharCode(8212)}</td>}
+                  {showLocation && <td style={Object.assign({padding:'6px 10px',color:'#64748b'},lastOptionalCol==='location'?divider:{})}>{li.location_name||String.fromCharCode(8212)}</td>}
                   <td style={{padding:'6px 10px',color:'#0f172a',fontWeight:500}}>{fmtN(li.quantity)}</td>
                   <td style={{padding:'6px 10px',color:'#64748b'}}>{li.unit||String.fromCharCode(8212)}</td>
                   <td style={{padding:'6px 10px',color:'#0f172a'}}>{fmt(li.rate)}</td>
                   <td style={{padding:'6px 10px',color:'#0f172a',fontWeight:700}}>{fmt(li.item_total)}</td>
-                  <td style={{padding:'6px 10px',color:'#64748b',fontSize:11}}>{li.tax_name||String.fromCharCode(8212)}</td>
                 </tr>
               );
             })}
+            {/* Row 1: Discount, Adjustment, Total Quantity, Sub Total (plus
+                any deduction placed here) — spread evenly. No divider ever
+                extends down into these summary rows. */}
+            <tr style={{background:'#fefce8',borderTop:'2px solid #fde68a'}}>
+              <td colSpan={colCount} style={{padding:'8px 16px'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:18,flexWrap:'wrap'}}>
+                  {row1Items.map(function(pair,i){
+                    return <span key={i} style={{fontSize:13,color:'#854d0e'}}><b>{pair[0]}:</b> {pair[1]}</span>;
+                  })}
+                </div>
+              </td>
+            </tr>
+            {/* Row 2: taxes + Total (plus any deduction placed here). */}
+            <tr style={{background:'#fefce8'}}>
+              <td colSpan={colCount} style={{padding:'8px 16px 10px'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:18,flexWrap:'wrap'}}>
+                  {row2Items.map(function(pair,i){
+                    const isTotal = pair[0]==='Total';
+                    return <span key={i} style={isTotal?{fontSize:14,color:'#713f12',fontWeight:800,marginLeft:'auto'}:{fontSize:13,color:'#854d0e'}}><b>{pair[0]}:</b> {pair[1]}</span>;
+                  })}
+                </div>
+              </td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1083,31 +1394,107 @@ function Attachments({ docs }) {
 // ----- DETAIL MODAL (PO / BILL / PMO) -----
 function DetailModal({ item, type, onClose }) {
   const isBill = type === 'bill', isPMO = type === 'pmo';
+  const [fullTextView, setFullTextView] = useState(null); // {label, text} - only used for genuinely long Notes/Terms that would take up too much of the popup inline
 
-  const fields = isPMO ? [
+  // PMO gets 4 sections matching ZB's own real layout exactly, plus a 5th
+  // section clearly separated and labeled as this dashboard's own added
+  // analysis (comparative fields that don't exist on the PMO itself).
+  const pmoSection1Main = [ // General — 6 fields, fits cleanly as 2 rows of 3
     ['PMO Number', item.pmoNumber],['PMO Date', toIndianDate(item.date)],
-    ['Vendor / Payee', item.vendor],['Payable Amount', fmt(item.amount)],
-    ['Payment Category', item.paymentCategory||String.fromCharCode(8212)],['Expense Account', item.expenseAccount||String.fromCharCode(8212)],
-    ['Customer Name', item.customerName||String.fromCharCode(8212)],['Closing Balance', fmt(item.closingBalance)],
-    ['Amt vs Bill', fmt(item.amtAgainstBill)],['Amt vs PO', fmt(item.amtAgainstPO)],
-    ['Amt vs Invoice', fmt(item.amtAgainstInvoice)],['Amt vs Expense', fmt(item.amtAgainstExpense)],
+    ['Payment Category', item.paymentCategory||String.fromCharCode(8212)],['Payment Sub-Category', item.paymentSubCat||String.fromCharCode(8212)],
+    ['Payment Type', item.paymentType||String.fromCharCode(8212)],['Payable Amount', fmt(item.amount)],
+  ];
+  // Attachment (plain) + Payment Terms (ExpandableText, since it can run
+  // long) share one row at the exact 1:2 ratio requested — built as raw
+  // JSX in the render below since mixing a plain field with an
+  // ExpandableText component isn't something InfoGridCustom's generic
+  // label/value renderer supports.
+  const pmoSection2 = [ // Vendor/Customer — matches ZB exactly, 4 fields
+    ['Vendor Name', item.vendor],['Customer Name', item.customerName||String.fromCharCode(8212)],
+    ['Expense Account', item.expenseAccount||String.fromCharCode(8212)],['Closing Balance', fmt(item.closingBalance)],
+  ];
+  const pmoSection4 = [ // To be filled by Finance Team — matches ZB exactly, 2 fields
+    ['Payment Date', item.paymentDate?toIndianDate(item.paymentDate):String.fromCharCode(8212)],
+    ['Payment Details', item.paymentDetails||String.fromCharCode(8212)],
+  ];
+  const pmoSection5 = [ // This dashboard's own comparative analysis fields — NOT part of the real PMO
+    ['Amt vs Bill', item.amtAgainstBill!=null?fmt(item.amtAgainstBill):String.fromCharCode(8212)],
+    ['Amt vs PO', item.amtAgainstPO!=null?fmt(item.amtAgainstPO):String.fromCharCode(8212)],
+    ['Amt vs Invoice', item.amtAgainstInvoice!=null?fmt(item.amtAgainstInvoice):String.fromCharCode(8212)],
+    ['Amt vs Expense', item.amtAgainstExpense!=null?fmt(item.amtAgainstExpense):String.fromCharCode(8212)],
     ['Submitted By', item.submittedBy||String.fromCharCode(8212)],['Submitted Date', toIndianDate(item.submittedDate)],
-    ['Attachment', item.attachmentId||'None'],
-  ] : isBill ? [
-    ['Bill Number', item.billNumber],['Bill Date', toIndianDate(item.date)],['Due Date', toIndianDate(item.dueDate)],
-    ['Vendor', item.vendor],['Vendor GSTIN', item.gstin||String.fromCharCode(8212)],
-    ['Project (PFB Match)', item.projectMatched||'Not matched'],
-    ['Total Amount', fmt(item.total)],['Balance Due', fmt(item.balance)],
-    ['Linked PO', (item.linkedPO && item.linkedPO.number) || (item.noPOExpected?'None expected':'None')],
-    ['PO Amount', item.linkedPO ? fmt(item.linkedPO.total) : String.fromCharCode(8212)],
-    ['Submitted By', item.submittedBy||String.fromCharCode(8212)],['Submitted Date', toIndianDate(item.submittedDate)],
-  ] : [
-    ['PO Number', item.poNumber],['PO Date', toIndianDate(item.date)],
-    ['Vendor', item.vendor],['Vendor GSTIN', item.gstin||String.fromCharCode(8212)],
-    ['Project (PFB Match)', item.projectMatched||'Not matched'],
-    ['Total Amount', fmt(item.total)],['PFB Budget', fmt(item.pfbTotal)],
-    ['Payment Terms', item.paymentTerms||String.fromCharCode(8212)],['Delivery Date', toIndianDate(item.deliveryDate)],
-    ['Submitted By', item.submittedBy||String.fromCharCode(8212)],['Submitted Date', toIndianDate(item.submittedDate)],
+  ];
+
+  // PO sections, per the exact real-ZB layout: Part A = 8 real PO fields
+  // in the stated order (wraps naturally into 3/3/2 rows via a 3-col
+  // grid), Part B = the two addresses at 50:50, Part C = this dashboard's
+  // own extra fields not present on the real PO itself.
+  const poOptionalFields = [
+    ['Requisition', item.requisition],
+    ['KCC Recover In Yrs', item.kccRecoverInYrs],
+    ['KCC Amount (INR)', item.kccAmount],
+    ['Check Status', item.checkStatus],
+    ['Shipment Preference', item.shipmentPreference],
+  ].filter(pair => pair[1]); // only included when this specific PO actually has a value
+  const poSectionA = [
+    ['Reference#', item.referenceNumber||String.fromCharCode(8212)],['Order Date', toIndianDate(item.date)],['Delivery Date', toIndianDate(item.deliveryDate)],
+    ['Payment Terms', item.paymentTerms||String.fromCharCode(8212)],['Kind Attention', item.kindAttention||String.fromCharCode(8212)],['Subject', item.subject||String.fromCharCode(8212)],
+    ['Quotation', item.quotation||String.fromCharCode(8212)],['Project', item.projectLabel||String.fromCharCode(8212)],
+    ...poOptionalFields,
+  ];
+  const poAddressRows = [
+    { template:'1fr 1fr', items: [
+      ['Vendor Address', item.vendorAddress||String.fromCharCode(8212)],
+      ['Delivery Address', item.deliverTo||String.fromCharCode(8212)],
+    ]},
+  ];
+  const poSectionC = [
+    ['Vendor', item.vendor],['Vendor GSTIN', item.gstin||String.fromCharCode(8212)],['Total Amount', fmt(item.total)],
+    ['Submitted By', item.submittedBy||String.fromCharCode(8212)],['Submitted Date', toIndianDate(item.submittedDate)],['PFB Budget', fmt(item.pfbTotal)],
+  ];
+  const poSectionCLastRow = [
+    { template:'1fr 2fr', items: [
+      ['Location', item.locationName||String.fromCharCode(8212)],
+      ['Project (PFB Match)', item.projectMatched||'Not matched'],
+    ]},
+  ];
+
+  // Bill sections, same approach: Part A = 6 real fields + optional ones
+  // when present, Part B = Vendor Address full-width, Part C = extras.
+  const billOptionalFields = [
+    ['Accounts Payable', item.accountsPayable],
+    ['Subject', item.billSubject],
+  ].filter(pair => pair[1]);
+  const billSectionA = [
+    // Real bug fixed: Order Number relied entirely on our own PO-matching
+    // object resolving, now uses Zoho's own reference_number directly
+    // first (what ZB itself displays here), falling back to our matched
+    // object only if that's somehow blank.
+    ['Order Number', item.orderNumber || (item.linkedPO && item.linkedPO.number) || (item.noPOExpected?'None expected':'None')],
+    ['Bill Date', toIndianDate(item.date)],['Due Date', toIndianDate(item.dueDate)],
+    ['Payment Terms', item.paymentTerms||String.fromCharCode(8212)],['Balance Due', fmt(item.balance)],['Total', fmt(item.total)],
+    ...billOptionalFields,
+  ];
+  const billAddressRows = [
+    { template:'2fr 1fr', items: [
+      ['Vendor Address', item.vendorAddress||String.fromCharCode(8212)],
+      ['Transaction Posting Date', item.transactionPostingDate ? toIndianDate(item.transactionPostingDate) : String.fromCharCode(8212)],
+    ]},
+  ];
+  const billSectionC = [
+    ['Vendor', item.vendor],['Vendor GSTIN', item.gstin||String.fromCharCode(8212)],['PO Amount', item.linkedPO ? fmt(item.linkedPO.total) : String.fromCharCode(8212)],
+    ['Submitted By', item.submittedBy||String.fromCharCode(8212)],['Submitted Date', toIndianDate(item.submittedDate)],['Bill Amount', fmt(item.total)],
+  ];
+  const billSectionCLastRow = [
+    { template:'1fr 2fr', items: [
+      ['Location', item.locationName||String.fromCharCode(8212)],
+      ['Project (PFB Match)', item.projectMatched||'Not matched'],
+    ]},
+  ];
+  const billCustomFieldsRow = [
+    ['Original Reference Bill Number', item.originalReferenceBillNumber||String.fromCharCode(8212)],
+    ['Project Name', item.billProjectName||String.fromCharCode(8212)],
+    ['Bill Type', item.billType||String.fromCharCode(8212)],
   ];
 
   const projectNames = (item.projectZoho && item.projectZoho.length) ? item.projectZoho : [];
@@ -1115,8 +1502,10 @@ function DetailModal({ item, type, onClose }) {
   // covering both so the PFB Alignment table doesn't end up silently empty
   // for one of the two types.
   const pfbChecks = item.lineChecks || item.pfbLineChecks;
+  const pfbUnavailableReason = item.pfbUnavailableReason;
 
   return (
+    <>
     <Modal onClose={onClose} width={980}
       title={isPMO ? ('PMO ' + item.pmoNumber) : isBill ? ('Bill ' + item.billNumber) : ('PO ' + item.poNumber)}
       subtitle={item.vendor}>
@@ -1128,15 +1517,90 @@ function DetailModal({ item, type, onClose }) {
           })}
         </div>
       )}
-      <InfoGrid fields={fields} cols={3}/>
+      {isPMO ? (
+        <>
+          <InfoGrid fields={pmoSection1Main} cols={3}/>
+          <div style={{background:'#f8fafc',borderRadius:10,padding:'14px 18px',marginBottom:16}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 2fr',gap:20,marginBottom:10}}>
+              <div>
+                <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,letterSpacing:'0.08em',marginBottom:2}}>PI/BILL ATTACHMENT</div>
+                <div style={{fontSize:14,color:'#0f172a',fontWeight:500,wordBreak:'break-word'}}>{item.attachmentName || item.attachmentId || 'None'}</div>
+              </div>
+              <ExpandableText label="Payment Terms" text={item.paymentTerms} onExpandFull={function(){setFullTextView({label:'Payment Terms',text:item.paymentTerms});}}/>
+            </div>
+            <ExpandableText label="Remarks" text={item.remarks} onExpandFull={function(){setFullTextView({label:'Remarks',text:item.remarks});}}/>
+          </div>
+          <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:8}}>Vendor/Customer</h3>
+          <InfoGrid fields={pmoSection2} cols={2}/>
+          {item.poBreakup && item.poBreakup.length>0 && <POBreakupTable rows={item.poBreakup} kind="po"/>}
+          {item.expenseBreakup && item.expenseBreakup.length>0 && <POBreakupTable rows={item.expenseBreakup} kind="expense"/>}
+          <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:8}}>To be filled by Finance Team</h3>
+          <InfoGridCustom rows={[{ template:'1fr 2fr', items: pmoSection4 }]}/>
+          <h3 style={{fontSize:13,fontWeight:700,color:'#7c3aed',marginBottom:8}}>Additional Analysis</h3>
+          <InfoGrid fields={pmoSection5} cols={3}/>
+        </>
+      ) : isBill ? (
+        <>
+          <InfoGrid fields={billSectionA} cols={3}/>
+          <InfoGridCustom rows={billAddressRows}/>
+          <InfoGrid fields={billSectionC} cols={3}/>
+          <InfoGridCustom rows={billSectionCLastRow}/>
+        </>
+      ) : (
+        <>
+          <InfoGrid fields={poSectionA} cols={3}/>
+          <InfoGridCustom rows={poAddressRows}/>
+          <InfoGrid fields={poSectionC} cols={3}/>
+          <InfoGridCustom rows={poSectionCLastRow}/>
+        </>
+      )}
+      <ItemsTable items={item.lineItems || item.line_items} title="Line Items" subTotal={item.subTotal} taxes={item.taxes} total={item.total}
+        discount={item.discount} discountFormatted={item.discountFormatted} adjustment={item.adjustment} adjustmentDescription={item.adjustmentDescription}/>
+      {isBill ? (
+        <>
+          <div style={{background:'#f8fafc',borderRadius:10,padding:'14px 18px',marginBottom:16}}>
+            <ExpandableText label="Notes" text={item.notes} onExpandFull={function(){setFullTextView({label:'Notes',text:item.notes});}}/>
+          </div>
+          <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:8}}>Custom Fields</h3>
+          <InfoGrid fields={billCustomFieldsRow} cols={3}/>
+        </>
+      ) : (
+        <div style={{background:'#f8fafc',borderRadius:10,padding:'14px 18px',marginBottom:16}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
+            <ExpandableText label="Notes" text={item.notes} onExpandFull={function(){setFullTextView({label:'Notes',text:item.notes});}}/>
+            <ExpandableText label="Terms & Conditions" text={item.terms} onExpandFull={function(){setFullTextView({label:'Terms & Conditions',text:item.terms});}}/>
+          </div>
+        </div>
+      )}
       <RecBox rec={item.recommendation}/>
-      <ItemsTable items={item.lineItems || item.line_items} title="Line Items"/>
       <CompTable checks={item.compliance} title={(isPMO?'PMO':isBill?'Bill':'PO') + ' Compliance Checks'}/>
-      {!isPMO && <LineTable checks={pfbChecks} title="PFB Alignment - Line by Line"/>}
-      {isBill && item.poLineChecks && item.poLineChecks.length>0 && <LineTable checks={item.poLineChecks} title="PO Match - Line by Line"/>}
+      {!isPMO && pfbChecks && pfbChecks.length>0 && <PFBAlignmentTable checks={pfbChecks} title="PFB Alignment - Line by Line"/>}
+      {!isPMO && (!pfbChecks || pfbChecks.length===0) && pfbUnavailableReason && (
+        <div style={{background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:8,padding:'10px 14px',marginBottom:20,fontSize:13,color:'#9a3412'}}>
+          <b>PFB Alignment not available:</b> {pfbUnavailableReason}
+        </div>
+      )}
+      {isBill && item.poLineChecks && item.poLineChecks.length>0 && <POMatchTable checks={item.poLineChecks} title="PO Match - Line by Line"/>}
       {isPMO && item.alignment && item.alignment.checks && item.alignment.checks.length>0 && <CompTable checks={item.alignment.checks} title="PI / Bill Alignment"/>}
-      <Attachments docs={item.attachments || item.docs || item.documents}/>
+      {isPMO ? (
+        item.attachmentId
+          ? <div style={{marginBottom:16}}>
+              <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>Attachments (1)</h3>
+              <span style={{display:'inline-flex',alignItems:'center',gap:6,background:'#f8fafc',color:'#64748b',border:'1px solid #e2e8f0',borderRadius:6,padding:'5px 10px',fontSize:13}}>
+                {'\u{1F4CE} ' + (item.attachmentName || 'PI/Bill — ref ' + item.attachmentId) + ' (preview coming in a later update)'}
+              </span>
+            </div>
+          : <Attachments docs={null}/>
+      ) : (
+        <Attachments docs={item.attachments || item.docs || item.documents}/>
+      )}
     </Modal>
+    {fullTextView && (
+      <Modal onClose={function(){setFullTextView(null);}} width={640} title={fullTextView.label} zIndex={1100}>
+        <div style={{fontSize:14,color:'#0f172a',lineHeight:1.6,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{fullTextView.text}</div>
+      </Modal>
+    )}
+    </>
   );
 }
 
@@ -1390,6 +1854,14 @@ export default function Dashboard() {
       </Head>
       <style>{
         '*{box-sizing:border-box;margin:0;padding:0}' +
+        // scrollbar-gutter:stable reserves the scrollbar's space on every
+        // tab regardless of whether that tab's content is tall enough to
+        // need one — this is what stops the page (and therefore the top 8
+        // cards) from changing width every time a shorter tab like Solar
+        // Parks removes the scrollbar. It does NOT force a scrollbar to
+        // show when one isn't needed — a short tab still shows none, only
+        // the space for one is always reserved so nothing shifts.
+        'html{scrollbar-gutter:stable}' +
         'body{background:#f1f5f9;color:#0f172a;font-family:"Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}' +
         '::-webkit-scrollbar{width:5px;height:5px}' +
         '::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}' +
@@ -1404,28 +1876,36 @@ export default function Dashboard() {
 
         <div style={{background:'#fff',borderBottom:'1.5px solid #e2e8f0',padding:'0 24px',display:'flex',alignItems:'center',justifyContent:'space-between',height:58,position:'sticky',top:0,zIndex:200,boxShadow:'0 1px 4px rgba(0,0,0,0.05)'}}>
           <div style={{display:'flex',alignItems:'center',gap:12}}>
-            <div style={{width:32,height:32,background:'#1d4ed8',borderRadius:8,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontWeight:900,fontSize:15}}>FC</div>
+            <div style={{width:32,height:32,background:'#1d4ed8',borderRadius:8,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontSize:17}}>{'\u26A1'}</div>
             <div>
               <div style={{fontWeight:800,fontSize:15,color:'#0f172a',letterSpacing:'-0.02em'}}>Finance Control Dashboard</div>
               <div style={{fontSize:11,color:'#94a3b8'}}>Rays Power Experts Ltd.</div>
             </div>
           </div>
-          <div style={{display:'flex',alignItems:'center',gap:14}}>
-            {totalFlag>0 && <div style={{background:'#fee2e2',color:'#b91c1c',padding:'3px 12px',borderRadius:20,fontSize:12,fontWeight:700,border:'1px solid #fca5a5'}}>{totalFlag} need attention</div>}
-            {lastSync && <div style={{fontSize:12,color:'#94a3b8',display:'flex',alignItems:'center',gap:5}}><span style={{width:6,height:6,borderRadius:'50%',background:'#22c55e',display:'inline-block'}}/>Live - {lastSync.toLocaleTimeString()}</div>}
-            <div style={{fontSize:13,color:'#64748b',fontWeight:500}}>Jatin Srivastava</div>
+
+          {/* True-centered regardless of how wide the side elements are */}
+          <div style={{position:'absolute',left:'50%',top:'50%',transform:'translate(-50%,-50%)',display:'flex',alignItems:'center',gap:14}}>
+            {totalFlag>0 && <div style={{background:'#fee2e2',color:'#b91c1c',padding:'3px 12px',borderRadius:20,fontSize:12,fontWeight:700,border:'1px solid #fca5a5',whiteSpace:'nowrap'}}>{totalFlag} need attention</div>}
+            {lastSync && <div style={{fontSize:12,color:'#94a3b8',display:'flex',alignItems:'center',gap:5,whiteSpace:'nowrap'}}><span style={{width:6,height:6,borderRadius:'50%',background:'#22c55e',display:'inline-block'}}/>Live - {lastSync.toLocaleTimeString()}</div>}
+            <div style={{fontSize:13,color:'#64748b',fontWeight:500,whiteSpace:'nowrap'}}>For - Jatin Srivastava</div>
+          </div>
+
+          {/* Developer credit - permanent, per explicit request */}
+          <div style={{textAlign:'right',lineHeight:1.3,flexShrink:0}}>
+            <div style={{fontSize:11,fontWeight:700,color:'#0f172a',whiteSpace:'nowrap'}}>Developed by: ASHISH KASWAN</div>
+            <div style={{fontSize:10,color:'#94a3b8',whiteSpace:'nowrap'}}>Business Analyst, Finance Control</div>
           </div>
         </div>
 
         <div style={{padding:'14px 24px',display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:9}}>
-          <Card label={'\u{1F4CB} POs PENDING'} value={pos.length} sub={fmt(poValue)} color="#f59e0b"/>
-          <Card label={'\u26A0\uFE0F PO ISSUES'} value={poIssues} sub="compliance / alignment" color="#f97316"/>
-          <Card label={'\u{1F9FE} BILLS PENDING'} value={bills.length} sub={fmt(billValue)} color="#8b5cf6"/>
-          <Card label={'\u26A0\uFE0F BILL ISSUES'} value={billIssues} sub="compliance / alignment" color="#ef4444"/>
-          <Card label={'\u{1F4B3} PMOs PENDING'} value={pmos.length} sub={fmt(pmoValue)} color="#0ea5e9"/>
-          <Card label={'\u26A0\uFE0F PMO ISSUES'} value={pmoIssues} sub={'of ' + pmos.length + ' PMOs'} color="#ef4444"/>
-          <Card label={'\u{1F31E} PROJECTS'} value={projects.length} sub={parks.length + ' solar parks'} color="#10b981"/>
-          <Card label={'\u{1F4CC} TOTAL PENDING'} value={totalPendingCount} sub={'POs + Bills + PMOs total - ' + fmt(totalPendingValue)} color="#dc2626"/>
+          <Card label="POs PENDING" icon={'\u{1F4CB}'} value={pos.length} sub={fmt(poValue)} color="#f59e0b"/>
+          <Card label="PO ISSUES" icon={'\u26A0\uFE0F'} value={poIssues} sub="compliance / alignment" color="#f97316"/>
+          <Card label="BILLS PENDING" icon={'\u{1F9FE}'} value={bills.length} sub={fmt(billValue)} color="#8b5cf6"/>
+          <Card label="BILL ISSUES" icon={'\u26A0\uFE0F'} value={billIssues} sub="compliance / alignment" color="#ef4444"/>
+          <Card label="PMOs PENDING" icon={'\u{1F4B3}'} value={pmos.length} sub={fmt(pmoValue)} color="#0ea5e9"/>
+          <Card label="PMO ISSUES" icon={'\u26A0\uFE0F'} value={pmoIssues} sub={'of ' + pmos.length + ' PMOs'} color="#ef4444"/>
+          <Card label="PROJECTS" icon={'\u{1F31E}'} value={projects.length} sub={parks.length + ' solar parks'} color="#10b981"/>
+          <Card label="TOTAL PENDING" icon={'\u{1F4CC}'} value={totalPendingCount} sub={fmt(totalPendingValue)} color="#dc2626"/>
         </div>
 
         <div style={{background:'#fff',borderBottom:'1.5px solid #e2e8f0',padding:'0 24px',display:'flex',alignItems:'center',justifyContent:'space-between',position:'sticky',top:58,zIndex:100,boxShadow:'0 1px 3px rgba(0,0,0,0.03)'}}>
@@ -1481,7 +1961,7 @@ export default function Dashboard() {
                   <div style={{overflowX:'auto'}}>
                     <table style={{width:'100%',borderCollapse:'collapse'}}>
                       <thead><tr>
-                        {['PO Number','Date','Vendor','Project','Amount','Compliance','Alignment','Recommendation',''].map(function(h){ return <th key={h} style={TH}>{h}</th>; })}
+                        {['PO Number','Date','Vendor','Project','Amount','Compliance','Alignment','Recommendation',''].map(function(h){ return <th key={h} style={(h==='Vendor'||h==='Amount')?Object.assign({},TH,{borderRight:'1.5px solid #cbd5e1'}):TH}>{h}</th>; })}
                       </tr></thead>
                       <tbody>
                         {sortByDate(pos,'date').map(function(po){
@@ -1489,9 +1969,9 @@ export default function Dashboard() {
                             <tr key={po.id} style={{borderBottom:'1px solid #f1f5f9',background:rowBg(po)}} onClick={function(){setSelected({item:po,type:'po'});}}>
                               <td style={Object.assign({},TD,{color:'#1d4ed8',fontWeight:700})}>{po.poNumber}</td>
                               <td style={Object.assign({},TD,{color:'#64748b'})}>{toIndianDate(po.date)}</td>
-                              <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:500,maxWidth:160,whiteSpace:'normal'})}>{po.vendor}</td>
+                              <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:500,maxWidth:160,whiteSpace:'normal',borderRight:'1.5px solid #cbd5e1'})}>{po.vendor}</td>
                               <td style={TD}><ProjectCodes names={po.projectZoho}/></td>
-                              <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:700})}>{fmt(po.total)}</td>
+                              <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:700,borderRight:'1.5px solid #cbd5e1'})}>{fmt(po.total)}</td>
                               <td style={TD}><CompBadge s={po.complianceStatus}/></td>
                               <td style={TD}><AlignBadge s={po.alignmentStatus}/></td>
                               <td style={TD}><RecBadge d={po.recommendation && po.recommendation.decision}/></td>
@@ -1514,20 +1994,24 @@ export default function Dashboard() {
               {loading.bills ? <Spinner label="Loading Bills from Zoho Books..."/> : (
                 <div style={{background:'#fff',borderRadius:12,border:'1px solid #e2e8f0',overflow:'hidden',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
                   <div style={{overflowX:'auto'}}>
-                    <table style={{width:'100%',borderCollapse:'collapse'}}>
+                    <table style={{width:'100%',borderCollapse:'collapse',tableLayout:'fixed'}}>
+                      <colgroup>
+                        <col style={{width:'13%'}}/><col style={{width:'8%'}}/><col style={{width:'13%'}}/><col style={{width:'12%'}}/>
+                        <col style={{width:'8%'}}/><col style={{width:'9%'}}/><col style={{width:'8%'}}/><col style={{width:'8%'}}/><col style={{width:'11%'}}/><col style={{width:'10%'}}/>
+                      </colgroup>
                       <thead><tr>
-                        {['Bill Number','Date','Vendor','Project','Amount','Linked PO','Compliance','Alignment','Recommendation',''].map(function(h){ return <th key={h} style={TH}>{h}</th>; })}
+                        {['Bill Number','Date','Vendor','Project','Amount','Linked PO','Compliance','Alignment','Recommendation',''].map(function(h){ return <th key={h} style={(h==='Vendor'||h==='Linked PO')?Object.assign({},TH,{borderRight:'1.5px solid #cbd5e1'}):TH}>{h}</th>; })}
                       </tr></thead>
                       <tbody>
                         {sortByDate(bills,'date').map(function(b){
                           return (
                             <tr key={b.id} style={{borderBottom:'1px solid #f1f5f9',background:rowBg(b)}} onClick={function(){setSelected({item:b,type:'bill'});}}>
-                              <td style={Object.assign({},TD,{color:'#7c3aed',fontWeight:700})}>{b.billNumber}</td>
+                              <td style={Object.assign({},TD,{color:'#7c3aed',fontWeight:700,whiteSpace:'normal',wordBreak:'break-word',overflowWrap:'anywhere'})}>{(b.billNumber||'').replace(/\//g,'/\u200B')}</td>
                               <td style={Object.assign({},TD,{color:'#64748b'})}>{toIndianDate(b.date)}</td>
-                              <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:500,maxWidth:160,whiteSpace:'normal'})}>{b.vendor}</td>
-                              <td style={TD}><ProjectCodes names={b.projectZoho}/></td>
+                              <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:500,whiteSpace:'normal',borderRight:'1.5px solid #cbd5e1'})}>{b.vendor}</td>
+                              <td style={Object.assign({},TD,{whiteSpace:'normal'})}><ProjectCodes names={b.projectZoho}/></td>
                               <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:700})}>{fmt(b.total)}</td>
-                              <td style={Object.assign({},TD,{color:'#64748b',fontSize:12})}>{(b.linkedPO && b.linkedPO.number) || (b.noPOExpected?'None expected':String.fromCharCode(8212))}</td>
+                              <td style={Object.assign({},TD,{color:'#64748b',fontSize:12,borderRight:'1.5px solid #cbd5e1'})}>{(b.linkedPO && b.linkedPO.number) || (b.noPOExpected?'None expected':String.fromCharCode(8212))}</td>
                               <td style={TD}><CompBadge s={b.complianceStatus}/></td>
                               <td style={TD}><AlignBadge s={b.alignmentStatus}/></td>
                               <td style={TD}><RecBadge d={b.recommendation && b.recommendation.decision}/></td>
@@ -1557,7 +2041,7 @@ export default function Dashboard() {
                     <div style={{overflowX:'auto'}}>
                       <table style={{width:'100%',borderCollapse:'collapse'}}>
                         <thead><tr>
-                          {['PMO Number','Date','Vendor/Payee','Amount','Payment Type','Project','Compliance','Alignment','Recommendation',''].map(function(h){ return <th key={h} style={TH}>{h}</th>; })}
+                          {['PMO Number','Date','Vendor/Payee','Amount','Payment Type','Project','Compliance','Alignment','Recommendation',''].map(function(h){ return <th key={h} style={(h==='Vendor/Payee'||h==='Project')?Object.assign({},TH,{borderRight:'1.5px solid #cbd5e1'}):TH}>{h}</th>; })}
                         </tr></thead>
                         <tbody>
                           {sortByDate(pmos,'date').map(function(p){
@@ -1565,10 +2049,10 @@ export default function Dashboard() {
                               <tr key={p.id} style={{background:p.complianceStatus!=='pass'?'#fefce8':'#fff',borderBottom:'1px solid #f1f5f9'}} onClick={function(){setSelected({item:p,type:'pmo'});}}>
                                 <td style={Object.assign({},TD,{color:'#0369a1',fontWeight:700})}>{p.pmoNumber}</td>
                                 <td style={Object.assign({},TD,{color:'#64748b'})}>{toIndianDate(p.date)}</td>
-                                <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:500,maxWidth:160,whiteSpace:'normal'})}>{p.vendor}</td>
+                                <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:500,maxWidth:160,whiteSpace:'normal',borderRight:'1.5px solid #cbd5e1'})}>{p.vendor}</td>
                                 <td style={Object.assign({},TD,{color:'#0f172a',fontWeight:700})}>{fmt(p.amount)}</td>
                                 <td style={Object.assign({},TD,{color:'#475569',fontSize:12})}>{p.payTypeLabel||String.fromCharCode(8212)}</td>
-                                <td style={Object.assign({},TD,{color:'#475569',fontSize:12})}>{p.project||String.fromCharCode(8212)}</td>
+                                <td style={Object.assign({},TD,{color:'#475569',fontSize:12,borderRight:'1.5px solid #cbd5e1'})}>{p.project||String.fromCharCode(8212)}</td>
                                 <td style={TD}><CompBadge s={p.complianceStatus}/></td>
                                 <td style={TD}><AlignBadge s={p.alignmentStatus||'na'}/></td>
                                 <td style={TD}><RecBadge d={p.recommendation && p.recommendation.decision}/></td>
@@ -1587,20 +2071,25 @@ export default function Dashboard() {
 
           {tab==='pfbs' && (
             <div className="fade">
-              <div style={{display:'flex',alignItems:'center',gap:14,marginBottom:14,flexWrap:'wrap'}}>
-                <span style={{fontSize:11,color:'#94a3b8',fontWeight:700,letterSpacing:'0.06em'}}>RATE/Wp LEGEND</span>
-                {[['< Rs.25', '#4ade80', '#052e16'],['Rs.25-30', '#fbbf24', '#451a03'],['Rs.30-35', '#fb923c', '#431407'],['>= Rs.35', '#f87171', '#450a0a']].map(function(item){
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:14,marginBottom:14,flexWrap:'wrap',background:'#fff',border:'1px solid #e2e8f0',borderRadius:10,padding:'10px 18px'}}>
+                <span style={{fontSize:11,color:'#94a3b8',fontWeight:700,letterSpacing:'0.06em',whiteSpace:'nowrap'}}>RATE/Wp LEGEND</span>
+                {[
+                  ['< Rs. 25', 'Green', 'Safe', '#22c55e'],
+                  ['Rs. 25 - 30', 'Yellow', 'Little High', '#eab308'],
+                  ['Rs. 30 - 35', 'Orange', 'High', '#f97316'],
+                  ['>= Rs. 35', 'Red', 'Very High', '#ef4444'],
+                ].map(function(item){
                   return (
-                    <span key={item[0]} style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'#475569'}}>
-                      <span style={{width:10,height:10,borderRadius:3,background:item[1],border:'1px solid ' + item[2] + '55',display:'inline-block'}}/>
-                      {item[0]}
+                    <span key={item[0]} style={{display:'flex',alignItems:'center',gap:7,fontSize:12,color:'#475569',whiteSpace:'nowrap'}}>
+                      <span style={{width:11,height:11,borderRadius:3,background:item[3],display:'inline-block',flexShrink:0}}/>
+                      <span><b>{item[1]}</b>: {item[0]} [{item[2]}]</span>
                     </span>
                   );
                 })}
               </div>
               {loading.projects ? <Spinner/> : (
                 <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(250px,1fr))',gap:11}}>
-                  {projects.map(function(p){
+                  {sortByEndDateDescClient(projects).map(function(p){
                     const rc = rateColor(p.ratePerWp);
                     return (
                       <div key={p.id} onClick={function(){startPFB(p);}}
@@ -1608,7 +2097,7 @@ export default function Dashboard() {
                         onMouseEnter={function(e){e.currentTarget.style.borderColor='#1d4ed8';e.currentTarget.style.boxShadow='0 4px 12px rgba(29,78,216,0.1)';}}
                         onMouseLeave={function(e){e.currentTarget.style.borderColor='#e2e8f0';e.currentTarget.style.boxShadow='0 1px 3px rgba(0,0,0,0.04)';}}>
                         <div style={{fontWeight:700,color:'#0f172a',fontSize:14,marginBottom:3}}>{p.name}</div>
-                        <div style={{fontSize:11,color:'#94a3b8',marginBottom:9}}>{p.agreementDate||'No date'} - {p.park}</div>
+                        <div style={{fontSize:11,color:'#94a3b8',marginBottom:9}}>{dashDate(p.endDate)||'No date'} - {p.park}</div>
                         {p.pfbReady ? (
                           <div>
                             <div style={{color:'#1d4ed8',fontWeight:800,fontSize:16}}>{fmt(p.pfbTotal)}</div>
@@ -1635,7 +2124,22 @@ export default function Dashboard() {
           {tab==='projects' && (
             <div className="fade">
               {loading.projects ? <Spinner/> : (
-                <div style={{background:'#fff',borderRadius:12,border:'1px solid #e2e8f0',overflow:'hidden',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+                <div style={{background:'#fff',borderRadius:12,border:'1px solid #e2e8f0',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+                  {/* Frozen header — labels apply to the sub-lines (individual
+                      projects) below each firm row, not the firm row itself.
+                      Real bug fixed here: the parent container previously had
+                      overflow:hidden, which clips a sticky element before it
+                      ever gets the chance to stick — removed that so this
+                      header actually appears and stays fixed while scrolling.
+                      Columns also widened + given a real gap, since 70px was
+                      not enough room for "SWITCHYARDS" as a header word or
+                      "4 SY" + a full rupee figure as data, which is what
+                      caused them to visually overlap. */}
+                  <div style={{display:'grid',gridTemplateColumns:'30px 2fr 1.1fr 0.9fr 0.9fr 0.9fr 1fr 1.3fr 1fr',columnGap:14,alignItems:'center',padding:'10px 16px',paddingLeft:38,background:'#eff6ff',borderBottom:'1.5px solid #dbeafe',position:'sticky',top:58,zIndex:150,borderRadius:'12px 12px 0 0'}}>
+                    {['','Project Name','Solar Park','DC Cap.','AC Cap.','BESS Cap.','SwitchYards','Total Budget','End Date'].map(function(h,hi){
+                      return <span key={hi} style={{fontSize:10,fontWeight:700,color:'#1e40af',letterSpacing:'0.04em',whiteSpace:'nowrap'}}>{h.toUpperCase()}</span>;
+                    })}
+                  </div>
                   {firms.map(function(firm,fi){
                     return (
                       <div key={fi}>
@@ -1652,7 +2156,7 @@ export default function Dashboard() {
                         {expandedFirms[fi]!==false && firm.projects.map(function(p,pi){
                           return (
                             <div key={pi} onClick={function(){setProjDetail(p);}}
-                              style={{display:'grid',gridTemplateColumns:'30px 1.8fr 100px 80px 70px 70px 70px 110px 90px',alignItems:'center',padding:'9px 16px',paddingLeft:38,borderBottom:'1px solid #f8fafc',cursor:'pointer',background:'#fff'}}
+                              style={{display:'grid',gridTemplateColumns:'30px 2fr 1.1fr 0.9fr 0.9fr 0.9fr 1fr 1.3fr 1fr',columnGap:14,alignItems:'center',padding:'9px 16px',paddingLeft:38,borderBottom:'1px solid #f8fafc',cursor:'pointer',background:'#fff'}}
                               onMouseEnter={function(e){e.currentTarget.style.background='#f8fafc';}} onMouseLeave={function(e){e.currentTarget.style.background='#fff';}}>
                               <span style={{fontSize:10,color:'#cbd5e1'}}>{'-'}</span>
                               <span style={{fontSize:13,color:'#334155',fontWeight:500}}>{p.name}</span>
@@ -1662,7 +2166,7 @@ export default function Dashboard() {
                               <span style={{fontSize:11,color:'#a16207'}}>{p.bess?(p.bess + ' MWh'):String.fromCharCode(8212)}</span>
                               <span style={{fontSize:11,color:'#64748b'}}>{p.sw?(p.sw + ' SY'):String.fromCharCode(8212)}</span>
                               <span style={{fontSize:12,color:'#0f172a',fontWeight:700}}>{p.pfbTotal?fmt(p.pfbTotal):String.fromCharCode(8212)}</span>
-                              <span style={{fontSize:11,color:'#64748b'}}>{p.agreementDate||String.fromCharCode(8212)}</span>
+                              <span style={{fontSize:11,color:'#64748b'}}>{dashDate(p.endDate)||String.fromCharCode(8212)}</span>
                             </div>
                           );
                         })}

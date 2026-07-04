@@ -12,7 +12,7 @@
 // proven smart-delta-cache version) does all the list/detail/approver work.
 
 import { getPendingPOs } from '../../lib/zoho';
-import { generatePFB, checkPOAlignment } from '../../lib/pfbEngine';
+import { generatePFB, checkPOAlignment, isSevere, isCaution } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runPOCompliance, getComplianceStatus } from '../../lib/checklistEngine';
 const { storeGet, KEYS } = require('../../lib/store');
@@ -39,23 +39,42 @@ export default async function handler(req, res) {
     const enriched = pos.map(po => {
       const lineItems = po.line_items || [];
 
+      // Same fix as bills.js: TDS-type deductions live in tds_summary, a
+      // separate array from taxes.
+      const tdsDeductions = (po.tds_summary || []).map(t => ({
+        tax_name: t.tax_name || t.tds_tax_name || t.name || 'TDS',
+        tax_amount: -Math.abs(Number(t.tax_amount ?? t.tds_amount ?? t.amount) || 0),
+      })).filter(t => t.tax_amount !== 0);
+
       // Project extraction from line items (tag-based, reliable) rather
       // than the document-level field, which Zoho frequently leaves blank
       const projectNamesFromLines = [...new Set(lineItems.map(li => li.project_name).filter(Boolean))];
       const zohoProjectName = projectNamesFromLines[0] || po.project_name || po.customer_name || po.delivery_customer_name || '';
       const project = projectNamesFromLines.map(pn => matchProject(pn, allProjects)).find(Boolean)
                     || matchProject(zohoProjectName, allProjects);
+      // Real bug fixed: "Project (PFB Match)" only ever showed the FIRST
+      // matched project, even when a PO's line items span several
+      // projects. This collects every distinct match instead, for display
+      // only — `project` above (used for PFB generation) intentionally
+      // stays as the single first match, since PFB generation needs one
+      // project's DC/AC/Switchyards, not several.
+      const allMatchedProjectNames = [...new Set(
+        projectNamesFromLines.map(pn => matchProject(pn, allProjects)).filter(Boolean).map(p => p.name)
+      )];
 
-      // ── COMPLIANCE CHECK (always runs, regardless of PFB)
-      const compliance       = runPOCompliance(po);
-      const complianceStatus = getComplianceStatus(compliance);
-
-      // ── ALIGNMENT CHECK (only if PFB exists)
+      // ── ALIGNMENT CHECK (only if PFB exists) — computed FIRST now, so
+      // pfbTotal is available for the new Budget Availability check below.
       let lineChecks      = [];
       let alignmentStatus = 'na'; // not applicable by default
       let pfbTotal        = null;
+      let pfbUnavailableReason = null; // shown to the user instead of the table just silently vanishing
 
-      if (project && project.dc && project.ac && project.sw) {
+      if (!project) {
+        pfbUnavailableReason = 'No project matched this PO — PFB comparison needs a matched project to compare against.';
+      } else if (!(project.dc && project.ac && project.sw)) {
+        const missing = [!project.dc && 'DC', !project.ac && 'AC', !project.sw && 'Switchyards'].filter(Boolean).join(', ');
+        pfbUnavailableReason = `Project "${project.name}" is missing ${missing} — set these in the project's PFB sheet to enable comparison.`;
+      } else {
         const pfbItems = generatePFB(project.name, project.dc, project.ac, project.sw, project.piling || 2000, project.wall || 2000, project.road || 2000);
         pfbTotal       = pfbItems.reduce((s, i) => s + i.amount, 0);
 
@@ -65,14 +84,19 @@ export default async function handler(req, res) {
         const matchedChecks = lineChecks.filter(l => l.status !== 'na' && l.status !== 'no_match');
         if (matchedChecks.length === 0) {
           alignmentStatus = 'na'; // No items matched any PFB scope — N/A not a problem
-        } else if (matchedChecks.some(l => l.status === 'reject')) {
+        } else if (matchedChecks.some(l => isSevere(l.status))) {
           alignmentStatus = 'reject';
-        } else if (matchedChecks.some(l => l.status === 'flag')) {
+        } else if (matchedChecks.some(l => isCaution(l.status))) {
           alignmentStatus = 'flag';
         } else {
           alignmentStatus = 'aligned';
         }
       }
+
+      // ── COMPLIANCE CHECK (always runs, regardless of PFB) — now passes
+      // pfbTotal for the new Budget Availability check.
+      const compliance       = runPOCompliance(po, pfbTotal);
+      const complianceStatus = getComplianceStatus(compliance);
 
       // ── FINAL RECOMMENDATION based on BOTH checks
       const recommendation = buildRecommendation(complianceStatus, alignmentStatus, compliance);
@@ -85,11 +109,11 @@ export default async function handler(req, res) {
         vendorId:       po.vendor_id,
         gstin:          po.gst_no || po.vendor_gst_in || '',
         projectZoho:    projectNamesFromLines.length ? projectNamesFromLines : (zohoProjectName ? [zohoProjectName] : []),
-        projectMatched: project?.name || null,
+        projectMatched: allMatchedProjectNames.length ? allMatchedProjectNames.join(', ') : null,
         projectId:      project?.id   || null,
         total:          po.total,
         subTotal:       po.sub_total,
-        taxes:          po.taxes || [],
+        taxes:          [...(po.taxes || []), ...tdsDeductions],
         currency:       po.currency_symbol || '₹',
         lineItems,
         notes:          po.notes || '',
@@ -101,6 +125,57 @@ export default async function handler(req, res) {
         paymentTerms:   po.payment_terms_label || po.payment_terms || '',
         attachments:    po.documents || [],
         pfbTotal,
+        pfbUnavailableReason,
+
+        // New in this round — confirmed against Zoho's official PO field
+        // names. "subject" isn't a standard Books field, so it's pulled
+        // defensively from custom fields by label match (this org appears
+        // to use one for it, based on the sample PDF) — falls back to
+        // empty rather than guessing wrong.
+        referenceNumber: po.reference_number || '',
+        // Real bug fixed: delivery_address?.attention was being used as a
+        // fallback for Kind Attention, but that field actually holds a
+        // LOCATION name (confirmed: showed "S.S. Nagar" instead of
+        // "Mr. Rohit Bishnoi" on a real PO) — not a person's name at all.
+        // Kind Attention is pulled from a custom field now, matching the
+        // same approach as Subject/Quotation. The value that was
+        // incorrectly appearing here is captured separately below as the
+        // genuine Location field instead.
+        kindAttention:   (po.custom_fields || []).find(f => /kind attention/i.test(f.label || f.placeholder || ''))?.value || po.attention || '',
+        locationName:    po.location_name || po.branch_name || po.delivery_address?.attention || '',
+        deliverTo:       po.delivery_address ? [
+          po.delivery_address.attention,
+          po.delivery_address.address,
+          [po.delivery_address.city, po.delivery_address.state, po.delivery_address.zip].filter(Boolean).join(' '),
+          po.delivery_address.country,
+        ].filter(Boolean).join(', ') : '',
+        subject: (po.custom_fields || []).find(f => /subject/i.test(f.label || f.placeholder || ''))?.value || '',
+        // Quotation and this document-level Project label are both visible
+        // on the real sample PO but aren't standard Books fields — same
+        // defensive custom-field lookup approach as Subject above.
+        quotation: (po.custom_fields || []).find(f => /quotation/i.test(f.label || f.placeholder || ''))?.value || '',
+        projectLabel: zohoProjectName || '',
+        // Real bug fixed: vendor_address was empty because this org's real
+        // field for it is (or falls back to) billing_address — same
+        // address-formatting approach as Deliver To above.
+        vendorAddress: (function(){
+          const addr = po.vendor_address || po.billing_address;
+          if (!addr) return '';
+          return [addr.address, [addr.city, addr.state, addr.zip].filter(Boolean).join(' '), addr.country].filter(Boolean).join(', ');
+        })(),
+        discount: po.discount || 0,
+        discountFormatted: po.discount_type === 'percentage' ? `${po.discount}%` : (po.discount ? `${po.currency_symbol||'₹'}${po.discount}` : ''),
+        approversList: po.approvers_list || [],
+        adjustment: po.adjustment || 0,
+        adjustmentDescription: po.adjustment_description || '',
+        // Optional fields — only present on some POs, so each is pulled
+        // defensively by label match and simply left blank (never shown)
+        // when this particular PO doesn't have them.
+        requisition:      (po.custom_fields || []).find(f => /requisition/i.test(f.label || f.placeholder || ''))?.value || '',
+        kccRecoverInYrs:  (po.custom_fields || []).find(f => /kcc recover/i.test(f.label || f.placeholder || ''))?.value || '',
+        kccAmount:        (po.custom_fields || []).find(f => /kcc amount/i.test(f.label || f.placeholder || ''))?.value || '',
+        checkStatus:      (po.custom_fields || []).find(f => /check status/i.test(f.label || f.placeholder || ''))?.value || '',
+        shipmentPreference: po.shipment_preference || (po.custom_fields || []).find(f => /shipment preference/i.test(f.label || f.placeholder || ''))?.value || '',
 
         // DUAL STATUS — shown separately in dashboard row
         complianceStatus,   // 'pass' | 'warn' | 'fail'

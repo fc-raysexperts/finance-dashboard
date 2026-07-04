@@ -52,8 +52,17 @@ async function zohoGET(path, params = {}) {
 }
 
 const detailCache     = {}; // id -> full record, ONLY for items confirmed to be Jatin's
-const checkedSnapshot = {}; // id -> { modified, isJatin } for EVERY item ever checked, tiny
+const checkedSnapshot = {}; // id -> { modified, isJatin, v } for EVERY item ever checked, tiny
 let hydrated = false; // have we tried loading from KV yet, this process lifetime?
+
+// Bumped whenever the SHAPE of what gets extracted/cached changes (like
+// this round's module_record_hash breakup fix) — not just whenever the
+// underlying Zoho record itself changes. Real bug this fixes: the cache
+// only ever compared against the PMO's own last_modified_time in Zoho,
+// which has no way to reflect a code change on this end — so every deploy
+// that changed extraction logic kept silently serving PRE-FIX cached data
+// forever, invisibly, until it was noticed the numbers still looked wrong.
+const CACHE_SCHEMA_VERSION = 2;
 
 async function hydrateFromPersistedStore() {
   if (hydrated) return;
@@ -149,9 +158,9 @@ export default async function handler(req, res) {
           const id       = r.module_record_id;
           const modified = r.last_modified_time || '';
           const checked  = checkedSnapshot[id];
-          if (checked && checked.modified === modified) {
+          if (checked && checked.modified === modified && checked.v === CACHE_SCHEMA_VERSION) {
             stoppedEarly = true;
-            break; // this, and everything older after it, is already known and unchanged
+            break; // this, and everything older after it, is already known, unchanged, AND extracted with current logic
           }
           toFetch.push(r);
         }
@@ -172,15 +181,27 @@ export default async function handler(req, res) {
             // anything else just gets a tiny "checked, not relevant"
             // marker so it's instantly skippable if seen again.
             if (r.status !== 'pending_approval') {
-              checkedSnapshot[id] = { modified, isJatin: false };
+              checkedSnapshot[id] = { modified, isJatin: false, v: CACHE_SCHEMA_VERSION };
               delete detailCache[id];
               return;
             }
             try {
-              const det     = await zohoGET(`/${PMO_MODULE}/${id}`);
-              const record  = det.data?.module_record || det.module_record || det;
+              // CONFIRMED via an actual captured API response body (not
+              // guessed): the real entered PO/Expense Breakup rows live in
+              // module_record_hash — a THIRD top-level object, sibling to
+              // module_record, that nothing in this codebase was reading
+              // before. Real structure per row: cf_po_number,
+              // cf_po_number_formatted, cf_basic_amount, cf_tax_amount,
+              // cf_adjustment, cf_total (each with a matching _formatted
+              // display-string counterpart). The earlier include=html
+              // theory was wrong — confirmed no html key ever appears in
+              // this response — so that param is dropped.
+              const det       = await zohoGET(`/${PMO_MODULE}/${id}`);
+              const record    = det.data?.module_record || det.module_record || det;
+              const recordHash = det.module_record_hash || det.data?.module_record_hash || {};
+              record.__breakupSource = recordHash; // stashed for extraction below, not sent to frontend
               const isJatin = isJatinCurrentApprover(record);
-              checkedSnapshot[id] = { modified, isJatin };
+              checkedSnapshot[id] = { modified, isJatin, v: CACHE_SCHEMA_VERSION };
               if (isJatin) detailCache[id] = record;
               else delete detailCache[id]; // never keep full detail for anyone else's
             } catch { /* leave unmarked — will be retried next refresh */ }
@@ -203,17 +224,97 @@ export default async function handler(req, res) {
 
       const pmoNumber    = String(f.cf_pmo_number || raw.record_name || '');
       const date         = String(f.cf_pmo_date   || f.cf_payment_date || '');
-      const purpose      = String(f.cf_remarks     || f.cf_payment_details || '');
+      // Real bug fixed here: Remarks and Payment Details were being merged
+      // into one field via `||`, even though the sample PDF shows these
+      // are two genuinely separate fields. Extracted separately now.
+      const remarks       = String(f.cf_remarks || '');
+      const paymentDetails = String(f.cf_payment_details || '');
+      const purpose      = remarks || paymentDetails; // kept for the existing compliance-engine input, which only needs *a* description
       const payTerms     = String(f.cf_payment_terms        || '');
       const payCategory  = String(f.cf_payment_category     || '');
       const paySubCat    = String(f.cf_payment_sub_category  || '');
       const payType      = String(f.cf_payment_type         || '');
+      const paymentDate  = String(f.cf_payment_date || f.cf_paid_date || '');
       const amount       = parseFloat(f.cf_payable_amount)  || 0;
       const vendor       = String(f.cf_vendor_name          || '—');
       const customerName = String(f.cf_customer_name        || '');
       const expenseAcct  = String(f.cf_expense_account      || '');
       const closingBal   = parseFloat(f.cf_closing_balance) || 0;
       const attachmentId = String(f.cf_attachment           || '');
+      const attachmentName = String(f.cf_attachment_formatted || '');
+
+      // Amt vs Bill/PO/Invoice/Expense and the PO Breakup table — exact
+      // custom-field names for these can't be confirmed from outside this
+      // org's actual Zoho setup, so this tries several plausible names
+      // defensively (falls back to empty rather than guessing wrong) and
+      // logs the raw field list once per cold start so the real names can
+      // be confirmed and locked in precisely next time.
+      const amtAgainstBill    = f.cf_amt_against_bill    ?? f.cf_amount_against_bill    ?? null;
+      const amtAgainstPO      = f.cf_amt_against_po      ?? f.cf_amount_against_po      ?? null;
+      const amtAgainstInvoice = f.cf_amt_against_invoice ?? f.cf_amount_against_invoice ?? null;
+      const amtAgainstExpense = f.cf_amt_against_expense ?? f.cf_amount_against_expense ?? null;
+      // PO Breakup is very unlikely to be a simple cf_ field given it's a
+      // multi-row table (PO Number/Basic/Tax/Total/Adjustment per row) —
+      // most likely a related-list/subform on the raw record itself.
+      // Confirmed via diagnostic: cf_cm_po_breakup_1 is the real field, and
+      // its "table_fields" array is the SCHEMA for this subform's columns
+      // — confirmed real column api_names: cf_po_number, cf_basic_amount,
+      // cf_tax_amount (inferred from pattern + screenshot), cf_total,
+      // cf_adjustment. That diagnostic showed the blank template
+      // ("value":"" on each column) though, not this PMO's actual entered
+      // rows — so actual row data is read from wherever it turns out to
+      // live: most likely breakupField.value itself (if Zoho puts entered
+      // rows there instead of in table_fields), or a top-level property on
+      // the raw record keyed by the field's own api_name/placeholder
+      // (common for Zoho subform values, kept separate from the field's
+      // schema definition).
+      // CONFIRMED (from an actual captured API response body, not a guess):
+      // real PO/Expense Breakup row data lives in raw.__breakupSource
+      // (= module_record_hash), each row shaped exactly as:
+      // { cf_po_number, cf_po_number_formatted, cf_basic_amount,
+      //   cf_tax_amount, cf_adjustment, cf_total, ...+_formatted pairs }
+      const breakupSource = raw.__breakupSource || {};
+
+      // Real fix for "sometimes 3 columns, sometimes 6" (confirmed by
+      // comparing two different real PMOs): Zoho always returns the FULL
+      // set of possible fields per row, but marks an unused one as null or
+      // an empty string (e.g. cf_tds was null/"" on a PMO with no TDS,
+      // while cf_adjustment had a real -892 on the same row) — it's not
+      // that different PMOs use a different schema, it's that each row
+      // only reports the columns it actually has a value for. Only include
+      // a key on the normalized row when it's genuinely present, so the
+      // frontend can render exactly the columns this specific PMO has,
+      // never more.
+      function isPresent(v) {
+        return v !== null && v !== undefined && v !== '' && String(v).toLowerCase() !== 'null';
+      }
+
+      const rawPoRows = Array.isArray(breakupSource.cf_cm_po_breakup_1) ? breakupSource.cf_cm_po_breakup_1 : [];
+      const poBreakup = rawPoRows.map(r => {
+        const row = {};
+        if (isPresent(r.cf_po_number_formatted) || isPresent(r.cf_po_number)) row.po_number = r.cf_po_number_formatted || r.cf_po_number;
+        if (isPresent(r.cf_basic_amount)) row.basic_amount = Number(r.cf_basic_amount);
+        if (isPresent(r.cf_tax_amount))   row.tax_amount   = Number(r.cf_tax_amount);
+        if (isPresent(r.cf_tds))          row.tds          = Number(r.cf_tds);
+        if (isPresent(r.cf_adjustment))   row.adjustment   = Number(r.cf_adjustment);
+        if (isPresent(r.cf_total))        row.total        = Number(r.cf_total);
+        return row;
+      });
+
+      // Same confirmed structure and same presence-detection logic for
+      // Expense Breakup — real field name pattern follows the same
+      // cf_cm_{type}_breakup_1 convention, columns can vary the same way.
+      const rawExpenseRows = Array.isArray(breakupSource.cf_cm_expense_breakup_1) ? breakupSource.cf_cm_expense_breakup_1 : [];
+      const expenseBreakup = rawExpenseRows.map(r => {
+        const row = {};
+        if (isPresent(r.cf_expense_detail)) row.expense_detail = r.cf_expense_detail;
+        if (isPresent(r.cf_basic_amount))   row.basic_amount   = Number(r.cf_basic_amount);
+        if (isPresent(r.cf_tax_amount))     row.tax_amount     = Number(r.cf_tax_amount);
+        if (isPresent(r.cf_tds))            row.tds            = Number(r.cf_tds);
+        if (isPresent(r.cf_adjustment))     row.adjustment     = Number(r.cf_adjustment);
+        if (isPresent(r.cf_total))          row.total          = Number(r.cf_total);
+        return row;
+      });
 
       const payTypeLabel = [payCategory, paySubCat, payType].filter(Boolean).join(' / ');
 
@@ -224,11 +325,15 @@ export default async function handler(req, res) {
         vendor_name:       vendor,
         amount,
         description:       purpose,
+        remarks,
+        paymentDetails,
         payment_type:      payTypeLabel,
         documents:         raw.documents || [],
         submitted_by_name: raw.submitted_by_name || '',
         closing_balance:   closingBal,
         approvers_list:    raw.approvers_list || [],
+        poBreakup,
+        expenseBreakup,
       };
 
       const compliance = runPMOCompliance(pmoNorm);
@@ -246,11 +351,18 @@ export default async function handler(req, res) {
         paymentSubCat:   paySubCat,
         paymentType:     payType,
         paymentTerms:    payTerms,
+        remarks,
+        paymentDetails,
+        paymentDate,
+        amtAgainstBill, amtAgainstPO, amtAgainstInvoice, amtAgainstExpense,
+        poBreakup,
+        expenseBreakup,
         payTypeLabel,
         customerName,
         expenseAccount:  expenseAcct,
         closingBalance:  closingBal,
         attachmentId,
+        attachmentName,
         submittedBy:     raw.submitted_by_name || '',
         submittedDate:   raw.submitted_date    || '',
         status:          raw.status,

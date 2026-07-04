@@ -17,7 +17,7 @@
 // proven smart-delta-cache version) does all the list/detail/approver work.
 
 import { getPendingBills, getCachedPODetail, getPendingPOs } from '../../lib/zoho';
-import { generatePFB, checkPOAlignment } from '../../lib/pfbEngine';
+import { generatePFB, checkPOAlignment, nameSimilarity, compareValue, isSevere, isCaution } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runBillCompliance, getComplianceStatus } from '../../lib/checklistEngine';
 const { storeGet, KEYS } = require('../../lib/store');
@@ -90,11 +90,32 @@ export default async function handler(req, res) {
     const enriched = await Promise.all(bills.map(async bill => {
       const lineItems = bill.line_items || [];
 
+      // Real fix for deductions never appearing: confirmed from the Bill's
+      // own top-level key list that tds_summary is a genuinely SEPARATE
+      // array from taxes — entries like "Payment of contractors HUF/Indiv
+      // (1%)" almost certainly live here, not in bill.taxes at all, which
+      // is exactly why the negative-amount detection never found them.
+      // TDS is always a deduction, so each entry is stored as a negative
+      // amount regardless of the sign Zoho itself uses, then merged
+      // straight into the same taxes array so all the existing
+      // deduction-placement logic just works without further changes.
+      if (!global.__billTdsSummaryLogged && bill.tds_summary && bill.tds_summary.length > 0) {
+        global.__billTdsSummaryLogged = true;
+        console.log('Bill tds_summary raw structure (one-time, confirming exact field names):', JSON.stringify(bill.tds_summary).slice(0, 1500));
+      }
+      const tdsDeductions = (bill.tds_summary || []).map(t => ({
+        tax_name: t.tax_name || t.tds_tax_name || t.name || 'TDS',
+        tax_amount: -Math.abs(Number(t.tax_amount ?? t.tds_amount ?? t.amount) || 0),
+      })).filter(t => t.tax_amount !== 0);
+
       // ── PROJECT MATCHING — from line items (tag-based, reliable) ──
       const projectNamesFromLines = [...new Set(lineItems.map(li => li.project_name).filter(Boolean))];
       const zohoProjectName = projectNamesFromLines[0] || bill.project_name || bill.customer_name || '';
       const project = projectNamesFromLines.map(pn => matchProject(pn, allProjects)).find(Boolean)
                     || matchProject(zohoProjectName, allProjects);
+      const allMatchedProjectNames = [...new Set(
+        projectNamesFromLines.map(pn => matchProject(pn, allProjects)).filter(Boolean).map(p => p.name)
+      )];
 
       // ── FIND + FETCH LINKED PO ─────────────────────────────
       let linkedPORef = findLinkedPO(bill);
@@ -108,10 +129,6 @@ export default async function handler(req, res) {
       }
       const noPOExpected = !linkedPORef && isExpectedNoPOItem(lineItems);
 
-      // ── COMPLIANCE CHECK (always runs) ────────────────────
-      const compliance       = runBillCompliance(bill, linkedPO || linkedPORef);
-      const complianceStatus = getComplianceStatus(compliance);
-
       // ── PO MATCH CHECK ────────────────────────────────────
       // Checks each bill line item against the linked PO's line items —
       // only possible when we have the PO's real detail (not a text guess)
@@ -120,8 +137,8 @@ export default async function handler(req, res) {
 
       if (linkedPO && lineItems.length > 0) {
         poLineChecks = checkBillAgainstPO(lineItems, linkedPO.line_items || []);
-        const hasReject = poLineChecks.some(c => c.status === 'reject');
-        const hasFlag   = poLineChecks.some(c => c.status === 'flag');
+        const hasReject = poLineChecks.some(c => isSevere(c.status));
+        const hasFlag   = poLineChecks.some(c => isCaution(c.status));
         const hasNoMatch= poLineChecks.some(c => c.status === 'no_match');
         poStatus = hasReject ? 'reject' : (hasFlag || hasNoMatch) ? 'flag' : 'ok';
       }
@@ -129,9 +146,17 @@ export default async function handler(req, res) {
       // ── PFB ALIGNMENT CHECK ───────────────────────────────
       let pfbLineChecks = [];
       let pfbStatus     = 'na';
+      let pfbUnavailableReason = null;
+      let pfbTotal      = null; // now computed BEFORE the compliance call below, so the new Budget Check can use it
 
-      if (project && project.dc && project.ac && project.sw) {
+      if (!project) {
+        pfbUnavailableReason = 'No project matched this Bill — PFB comparison needs a matched project to compare against.';
+      } else if (!(project.dc && project.ac && project.sw)) {
+        const missing = [!project.dc && 'DC', !project.ac && 'AC', !project.sw && 'Switchyards'].filter(Boolean).join(', ');
+        pfbUnavailableReason = `Project "${project.name}" is missing ${missing} — set these in the project's PFB sheet to enable comparison.`;
+      } else {
         const pfbItems = generatePFB(project.name, project.dc, project.ac, project.sw, project.piling || 2000, project.wall || 2000, project.road || 2000);
+        pfbTotal       = pfbItems.reduce((s, i) => s + i.amount, 0);
         pfbLineChecks  = checkPOAlignment(lineItems, pfbItems);
 
         const matchedChecks = pfbLineChecks.filter(l =>
@@ -139,14 +164,18 @@ export default async function handler(req, res) {
         );
         if (matchedChecks.length === 0) {
           pfbStatus = 'na';
-        } else if (matchedChecks.some(l => l.status === 'reject')) {
+        } else if (matchedChecks.some(l => isSevere(l.status))) {
           pfbStatus = 'reject';
-        } else if (matchedChecks.some(l => l.status === 'flag')) {
+        } else if (matchedChecks.some(l => isCaution(l.status))) {
           pfbStatus = 'flag';
         } else {
           pfbStatus = 'aligned';
         }
       }
+
+      // ── COMPLIANCE CHECK (always runs) ────────────────────
+      const compliance       = runBillCompliance(bill, linkedPO || linkedPORef, pfbTotal);
+      const complianceStatus = getComplianceStatus(compliance);
 
       // ── OVERALL ALIGNMENT STATUS — worst of poStatus and pfbStatus ──
       const alignmentStatus =
@@ -154,6 +183,7 @@ export default async function handler(req, res) {
         [poStatus, pfbStatus].includes('flag')   ? 'flag'   :
         poStatus === 'ok' || pfbStatus === 'aligned' ? 'aligned' :
         'na';
+
 
       // ── FINAL RECOMMENDATION ──────────────────────────────
       const recommendation = buildRecommendation(
@@ -169,20 +199,54 @@ export default async function handler(req, res) {
         vendorId:       bill.vendor_id,
         gstin:          bill.gst_no          || '',
         projectZoho:    projectNamesFromLines.length ? projectNamesFromLines : (zohoProjectName ? [zohoProjectName] : []),
-        projectMatched: project?.name        || null,
+        projectMatched: allMatchedProjectNames.length ? allMatchedProjectNames.join(', ') : null,
         projectId:      project?.id          || null,
         total:          bill.total,
         subTotal:       bill.sub_total,
         balance:        bill.balance,
         currency:       bill.currency_symbol || '₹',
         lineItems,
-        taxes:          bill.taxes           || [],
+        taxes:          [...(bill.taxes || []), ...tdsDeductions],
         notes:          bill.notes           || '',
         terms:          bill.terms           || '',
         submittedBy:    bill.submitted_by_name || '',
         submittedDate:  bill.submitted_date    || '',
         attachments:    bill.documents         || [],
         noPOExpected,
+        pfbUnavailableReason,
+        paymentTerms:   bill.payment_terms_label || (bill.payment_terms != null ? `Net ${bill.payment_terms}` : ''),
+        // Real bug fixed: bill_type was assumed to be a standard Books
+        // field, but the real sample PDF shows "Bill Type: Expense" sitting
+        // INSIDE the "Custom Fields" box, right alongside Project Name —
+        // which is confirmed working via custom-field lookup, and Bill
+        // Type wasn't. Checking the custom field first now, same as
+        // Project Name, falling back to the standard field only if that's
+        // somehow blank.
+        billType: (bill.custom_fields || []).find(f => /bill type/i.test(f.label || f.placeholder || ''))?.value || bill.bill_type || '',
+        // Confirmed visible on the real sample Bill under "CUSTOM FIELDS" —
+        // none of these are standard Books fields, so pulled defensively
+        // by label match, same approach as Subject/Quotation on POs.
+        // Real fix: this isn't a custom field at all for this org — scanned
+        // the actual Bill's top-level keys and found txn_value_date, which
+        // matches Zoho's own help documentation describing Transaction
+        // Posting Date as exactly a "value date" concept (the date journal
+        // entries post, separate from the bill's own date field). Old
+        // fallbacks kept in case a different org exposes this differently.
+        transactionPostingDate: bill.txn_value_date || bill.transaction_date || (bill.custom_fields || []).find(f => /posting/i.test(f.label || f.placeholder || ''))?.value || '',
+        originalReferenceBillNumber: (bill.custom_fields || []).find(f => /original reference bill/i.test(f.label || f.placeholder || ''))?.value || '',
+        billProjectName: (bill.custom_fields || []).find(f => /project name/i.test(f.label || f.placeholder || ''))?.value || '',
+        billSubject: (bill.custom_fields || []).find(f => /subject/i.test(f.label || f.placeholder || ''))?.value || '',
+        accountsPayable: (bill.custom_fields || []).find(f => /accounts payable/i.test(f.label || f.placeholder || ''))?.value || '',
+        discount: bill.discount || 0,
+        discountFormatted: bill.discount_type === 'percentage' ? `${bill.discount}%` : (bill.discount ? `${bill.currency_symbol||'₹'}${bill.discount}` : ''),
+        adjustment: bill.adjustment || 0,
+        adjustmentDescription: bill.adjustment_description || '',
+        vendorAddress: (function(){
+          const addr = bill.vendor_address || bill.billing_address;
+          if (!addr) return '';
+          return [addr.address, [addr.city, addr.state, addr.zip].filter(Boolean).join(' '), addr.country].filter(Boolean).join(', ');
+        })(),
+        locationName: bill.location_name || bill.branch_name || '',
 
         // Linked PO summary (uses full detail when we have it, otherwise the reference)
         linkedPO: (linkedPO || linkedPORef) ? {
@@ -192,6 +256,12 @@ export default async function handler(req, res) {
           vendor: linkedPO?.vendor_name ?? null,
           date:   linkedPO?.date ?? null,
         } : null,
+        // Real bug fixed: Order Number showed "None" whenever our own
+        // PO-matching logic didn't resolve a full linked PO object, even
+        // when Zoho's own bill.reference_number field (what ZB itself
+        // displays as ORDER NUMBER) clearly had the PO number as text.
+        // Now used as a direct, reliable fallback.
+        orderNumber: bill.reference_number || '',
 
         // DUAL STATUS — both shown as separate badges in the row
         complianceStatus,    // 'pass' | 'warn' | 'fail'
@@ -237,21 +307,20 @@ function checkBillAgainstPO(billItems, poItems) {
   return billItems.map(bi => {
     const biName = (bi.name || '').toLowerCase().trim();
 
-    let bestMatch  = null;
-    let bestScore  = 0;
-
+    // Same normalized similarity score already proven for PFB matching -
+    // confirmed real issue this fixes: the old approach used a raw,
+    // un-normalized common-word COUNT with no real threshold, so it could
+    // pick a weak, wrong candidate (any shared word "won") or fail to
+    // recognize a genuine match if wording length differed a lot between
+    // the Bill and PO line item.
+    let bestMatch = null;
+    let bestScore = 0;
     for (const pi of poItems) {
-      const piName = (pi.name || '').toLowerCase().trim();
-      const biWords = biName.split(/\s+/);
-      const piWords = piName.split(/\s+/);
-      const common  = biWords.filter(w => w.length > 2 && piWords.includes(w)).length;
-      if (common > bestScore) {
-        bestScore = common;
-        bestMatch = pi;
-      }
+      const score = nameSimilarity(biName, (pi.name || '').toLowerCase().trim());
+      if (score > bestScore) { bestScore = score; bestMatch = pi; }
     }
 
-    if (!bestMatch || bestScore === 0) {
+    if (!bestMatch || bestScore < 0.3) {
       return {
         lineItem:     bi.name,
         billQty:      bi.quantity,
@@ -260,33 +329,39 @@ function checkBillAgainstPO(billItems, poItems) {
         poQty:        null,
         poRate:       null,
         poAmount:     null,
-        rateVariance: null,
-        qtyVariance:  null,
+        qtyVariance:  null, rateVariance: null,
+        qtyStatus:    'na', rateStatus:   'na',
         status:       'no_match',
         comment:      `"${bi.name}" — not found in linked PO. Item not ordered or wrong PO linked.`,
       };
     }
 
-    const rateVar = bestMatch.rate > 0
-      ? ((bi.rate - bestMatch.rate) / bestMatch.rate * 100)
-      : null;
-
-    const qtyVar = bestMatch.quantity > 0
-      ? ((bi.quantity - bestMatch.quantity) / bestMatch.quantity * 100)
-      : null;
+    // Same direction-aware comparison used for the PFB-alignment table —
+    // confirmed real bug this fixes: the old logic used Math.abs() on the
+    // rate variance, so a Bill rate well BELOW the PO rate (favorable)
+    // got the exact same "reject" label as one well ABOVE it. It also
+    // only ever flagged qty in one direction (over-billed), silently
+    // ignoring under-billing, and rolled both into a single opaque
+    // status — meaning a pure qty mismatch could show "Variance" right
+    // next to a correctly-computed 0.0% rate variance, with nothing in
+    // the table explaining why. Both dimensions are now compared and
+    // shown explicitly and symmetrically.
+    const rateCmp = compareValue(bi.rate, bestMatch.rate);
+    const qtyCmp  = compareValue(bi.quantity, bestMatch.quantity);
+    // Same as the PFB-alignment table: Overall reflects whether the
+    // line's actual total (Qty x Rate) came in above or below the
+    // linked PO's total for that item - a separate signal from the
+    // individual Qty/Rate statuses.
+    const amountCmp = compareValue(bi.item_total, bestMatch.item_total);
+    const status = amountCmp.status;
 
     const flags = [];
-    if (rateVar !== null && Math.abs(rateVar) > 0.5) {
-      flags.push(`Rate mismatch: Bill ₹${bi.rate} vs PO ₹${bestMatch.rate} (${rateVar > 0 ? '+' : ''}${rateVar.toFixed(1)}%) — must match PO exactly`);
+    if (rateCmp.status !== 'ok' && rateCmp.status !== 'na') {
+      flags.push(`Rate ${rateCmp.variance > 0 ? 'above' : 'below'} PO: Bill ₹${bi.rate} vs PO ₹${bestMatch.rate} (${rateCmp.variance > 0 ? '+' : ''}${rateCmp.variance}%)`);
     }
-    if (qtyVar !== null && qtyVar > 0) {
-      flags.push(`Qty overbilled: Bill ${bi.quantity} vs PO ${bestMatch.quantity} (${qtyVar.toFixed(1)}% over PO qty)`);
+    if (qtyCmp.status !== 'ok' && qtyCmp.status !== 'na') {
+      flags.push(`Qty ${qtyCmp.variance > 0 ? 'above' : 'below'} PO: Bill ${bi.quantity} vs PO ${bestMatch.quantity} (${qtyCmp.variance > 0 ? '+' : ''}${qtyCmp.variance}%)`);
     }
-
-    const status =
-      (rateVar !== null && Math.abs(rateVar) > 25) || (qtyVar !== null && qtyVar > 25) ? 'reject' :
-      flags.length > 0 ? 'flag' :
-      'ok';
 
     return {
       lineItem:     bi.name,
@@ -296,8 +371,8 @@ function checkBillAgainstPO(billItems, poItems) {
       poQty:        bestMatch.quantity,
       poRate:       bestMatch.rate,
       poAmount:     bestMatch.item_total,
-      rateVariance: rateVar !== null ? +rateVar.toFixed(1) : null,
-      qtyVariance:  qtyVar  !== null ? +qtyVar.toFixed(1)  : null,
+      qtyVariance:  qtyCmp.variance, rateVariance: rateCmp.variance,
+      qtyStatus:    qtyCmp.status,   rateStatus:   rateCmp.status,
       status,
       comment:      flags.length > 0 ? flags.join(' | ') : `Matches PO item "${bestMatch.name}" exactly`,
     };

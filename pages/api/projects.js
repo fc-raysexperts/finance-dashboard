@@ -4,7 +4,7 @@
 // per-project variable overrides DC/AC/SW/Piling/Wall/Road (item 1),
 // and per-project Zoho Name overrides (item 9).
 
-const { PROJECTS, SOLAR_PARKS, groupByFirm, quarterFromEndDate } = require('../../data/projects');
+const { PROJECTS, SOLAR_PARKS, groupByFirm, quarterFromEndDate, sortByEndDateDesc } = require('../../data/projects');
 const { generatePFB } = require('../../lib/pfbEngine');
 const { storeGet, KEYS } = require('../../lib/store');
 
@@ -39,7 +39,22 @@ export default async function handler(req, res) {
         piling: ov.piling ?? p.piling ?? 2000,
         wall:   ov.wall   ?? p.wall   ?? 2000,
         road:   ov.road   ?? p.road   ?? 2000,
-        zohoNames: [...(p.zohoNames || []), ...(nameOverrides[p.id] || [])],
+        // Dedupe case-insensitively when merging — without this, adding a
+        // Zoho name via "Modify/Add Zoho Names" that happens to already
+        // exist in the base list (or re-adding the same one across
+        // sessions) silently produces a duplicate that lingers forever,
+        // which is exactly what caused the React "duplicate key" warning
+        // and bloated the zohoNames array sent to project-financials.
+        zohoNames: (function(){
+          const seen = new Set();
+          const merged = [...(p.zohoNames || []), ...(nameOverrides[p.id] || [])];
+          return merged.filter(n => {
+            const key = (n||'').toUpperCase().trim();
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        })(),
       };
       // Recompute revenue quarter if the End Date was edited
       if (fov.endDate) merged.quarter = quarterFromEndDate(fov.endDate);
@@ -70,7 +85,7 @@ export default async function handler(req, res) {
         .map(id => allProjects.find(p => p.id === id))
         .filter(p => p && p.park === parkName);
       const byParkField = allProjects.filter(p => p.park === parkName && !byIdList.includes(p));
-      const parkProjects = [...byIdList, ...byParkField];
+      const parkProjects = sortByEndDateDesc([...byIdList, ...byParkField]);
 
       return {
         name:       parkName,

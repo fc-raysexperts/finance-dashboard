@@ -77,6 +77,17 @@ function projectIsReady(p) {
   return p.dc != null && p.ac != null && p.sw != null;
 }
 
+// Shared date comparator for DD-MM-YYYY strings (used wherever projects
+// need sorting by a real date - End Date, per item 6).
+const dateComp = d => (d || '').split('-').reverse().join('-');
+function sortByEndDateDesc(arr) {
+  return arr.slice().sort((a, b) => {
+    if (!a.endDate) return 1;
+    if (!b.endDate) return -1;
+    return dateComp(b.endDate).localeCompare(dateComp(a.endDate));
+  });
+}
+
 function groupByFirm(projects) {
   const map = {};
   for (const p of projects) {
@@ -84,23 +95,18 @@ function groupByFirm(projects) {
     if (!map[firm]) map[firm] = { firmName: firm, projects: [] };
     map[firm].projects.push(p);
   }
-  const toComp = d => (d || '').split('-').reverse().join('-');
   for (const f of Object.values(map)) {
-    f.projects.sort((a, b) => {
-      if (!a.agreementDate) return 1;
-      if (!b.agreementDate) return -1;
-      return toComp(b.agreementDate).localeCompare(toComp(a.agreementDate));
-    });
+    f.projects = sortByEndDateDesc(f.projects);
   }
   return Object.values(map).sort((a, b) => {
-    const aDate = a.projects[0]?.agreementDate;
-    const bDate = b.projects[0]?.agreementDate;
+    const aDate = a.projects[0]?.endDate;
+    const bDate = b.projects[0]?.endDate;
     if (!aDate) return 1; if (!bDate) return -1;
-    return toComp(bDate).localeCompare(toComp(aDate));
+    return dateComp(bDate).localeCompare(dateComp(aDate));
   });
 }
 
 module.exports = {
   PROJECTS, SOLAR_PARKS,
-  matchProject, projectIsReady, groupByFirm, quarterFromEndDate,
+  matchProject, projectIsReady, groupByFirm, quarterFromEndDate, sortByEndDateDesc,
 };
