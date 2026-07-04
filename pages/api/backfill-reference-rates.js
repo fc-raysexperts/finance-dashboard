@@ -22,7 +22,6 @@ const { getAccessToken } = require('../../lib/zohoToken');
 const { storeGet, storeSet, KEYS } = require('../../lib/store');
 const { getItemGroupKey } = require('../../lib/referenceRates');
 
-const BACKFILL_START_DATE = '2026-04-01'; // the confirmed 3-month window
 const BATCH_SIZE = 60; // documents' full detail fetched per invocation - kept conservative to stay safely within execution time limits
 
 async function zohoGET(path, params = {}) {
@@ -70,14 +69,31 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: 'Add ?key=check123 to the URL' });
   }
 
+  // Date range now comes from the request — lets a second run target
+  // exactly a different window (e.g. the Jan1-Mar31 gap) without
+  // re-touching or re-charging for documents the first run already
+  // covered. Defaults preserve the original April-onwards behavior if
+  // these aren't passed at all.
+  const startDate = req.query.startDate || '2026-04-01';
+  const endDate   = req.query.endDate || null; // null = open-ended (today)
+  // Cursor is stored under a key SPECIFIC to this exact date range, so
+  // running a second window's backfill can never corrupt or collide with
+  // a different, already-completed window's progress.
+  const cursorKey = `${KEYS.REFERENCE_RATE_BACKFILL_CURSOR}_${startDate}_${endDate || 'open'}`;
+
   try {
-    let cursor = await storeGet(KEYS.REFERENCE_RATE_BACKFILL_CURSOR).catch(() => null);
+    let cursor = await storeGet(cursorKey).catch(() => null);
     if (!cursor) {
-      cursor = { stage: 'items', page: 1, offsetInPage: 0, processedDocs: 0 };
+      // Skip the Items catalog stage entirely if it's already been stored
+      // by a prior run — no need to spend ~17 calls re-fetching the exact
+      // same catalog snapshot every time a new window is backfilled.
+      const existingCatalog = await storeGet(KEYS.REFERENCE_RATE_CATALOG).catch(() => null);
+      cursor = existingCatalog
+        ? { stage: 'pos', page: 1, offsetInPage: 0, processedDocs: 0 }
+        : { stage: 'items', page: 1, offsetInPage: 0, processedDocs: 0 };
     }
 
-    // ── STAGE 1: Items catalog (one-time, done fully in a single call —
-    // ~17 list calls for the whole catalog, safely within limits) ──
+    // ── STAGE 1: Items catalog (one-time ever, not per-window) ──
     if (cursor.stage === 'items') {
       let catalog = {};
       let page = 1;
@@ -93,7 +109,7 @@ export default async function handler(req, res) {
       }
       await storeSet(KEYS.REFERENCE_RATE_CATALOG, catalog);
       cursor = { stage: 'pos', page: 1, offsetInPage: 0, processedDocs: 0 };
-      await storeSet(KEYS.REFERENCE_RATE_BACKFILL_CURSOR, cursor);
+      await storeSet(cursorKey, cursor);
       return res.status(200).json({
         stage: 'items_done', catalogSize: Object.keys(catalog).length,
         message: 'Items catalog stored. Call again to begin processing POs.',
@@ -107,12 +123,12 @@ export default async function handler(req, res) {
       const coveredIds = new Set(Object.keys(history).filter(k => k.startsWith('id:')).map(k => k.slice(3)).filter(id => catalogIds.has(id)));
       const freehandCount = Object.keys(history).filter(k => k.startsWith('name:')).length;
       return res.status(200).json({
-        stage: 'done',
+        stage: 'done', window: `${startDate} to ${endDate || 'present'}`,
         catalogSize: catalogIds.size,
         catalogItemsCovered: coveredIds.size,
         coveragePercent: catalogIds.size ? Math.round((coveredIds.size / catalogIds.size) * 1000) / 10 : 0,
         freehandItemsTracked: freehandCount,
-        message: 'Backfill complete.',
+        message: 'Backfill complete for this window.',
       });
     }
 
@@ -121,7 +137,9 @@ export default async function handler(req, res) {
     const listKey  = cursor.stage === 'pos' ? 'purchaseorders' : 'bills';
     const source   = cursor.stage; // 'pos' | 'bills'
 
-    const listData = await zohoGET(endpoint, { date_start: BACKFILL_START_DATE, per_page: 200, page: cursor.page });
+    const dateParams = { date_start: startDate };
+    if (endDate) dateParams.date_end = endDate;
+    const listData = await zohoGET(endpoint, { ...dateParams, per_page: 200, page: cursor.page });
     const pageRecords = listData[listKey] || [];
     const hasMorePage = listData.page_context?.has_more_page || false;
 
@@ -158,12 +176,12 @@ export default async function handler(req, res) {
     } else {
       nextCursor = { stage: source, page: cursor.page, offsetInPage: newOffset, processedDocs: cursor.processedDocs + processedInBatch };
     }
-    await storeSet(KEYS.REFERENCE_RATE_BACKFILL_CURSOR, nextCursor);
+    await storeSet(cursorKey, nextCursor);
 
     const distinctItemsSoFar = Object.keys(history).length;
 
     return res.status(200).json({
-      stage: source,
+      stage: source, window: `${startDate} to ${endDate || 'present'}`,
       processedThisBatch: processedInBatch,
       totalProcessedSoFar: nextCursor.processedDocs,
       distinctItemsFound: distinctItemsSoFar,
