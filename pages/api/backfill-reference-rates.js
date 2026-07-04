@@ -80,9 +80,48 @@ export default async function handler(req, res) {
   // running a second window's backfill can never corrupt or collide with
   // a different, already-completed window's progress.
   const cursorKey = `${KEYS.REFERENCE_RATE_BACKFILL_CURSOR}_${startDate}_${endDate || 'open'}`;
+  const isDefaultWindow = startDate === '2026-04-01' && !endDate;
+
+  // Real fix for a genuine confusion this endpoint caused twice: visiting
+  // the plain URL "just to check it's alive" was never actually free — it
+  // silently processed one real batch each time, costing real Zoho calls
+  // and advancing progress. ?status=1 is now a completely read-only mode:
+  // it only reports the current cursor's state for this window, makes
+  // ZERO Zoho calls, and writes nothing — safe to visit as many times as
+  // you like, for exactly the "just checking" use case this was needed for.
+  if (req.query.status === '1') {
+    const cursor = await storeGet(cursorKey).catch(() => null);
+    const legacyCursor = isDefaultWindow ? await storeGet(KEYS.REFERENCE_RATE_BACKFILL_CURSOR).catch(() => null) : null;
+    return res.status(200).json({
+      readOnly: true,
+      window: `${startDate} to ${endDate || 'present'}`,
+      currentCursor: cursor || 'not started yet',
+      legacyCursorForThisWindow: legacyCursor || undefined,
+      note: 'This is a status check only — no Zoho calls were made, nothing was processed.',
+    });
+  }
 
   try {
     let cursor = await storeGet(cursorKey).catch(() => null);
+
+    // Real bug fix, self-healing: the original completed backfill (before
+    // per-window cursor keys existed) stored its "done" status under one
+    // fixed key. Checking the bare URL afterward looked under the NEW
+    // per-window key, found nothing, and wrongly restarted that window
+    // from scratch. This checks the OLD fixed key for the default window
+    // specifically, and — if it shows the window was already completed —
+    // overrides whatever's under the new key (even a wrongly-restarted
+    // partial cursor from that bug) with the correct completed state.
+    // Runs automatically, no manual cleanup needed, and only ever matters
+    // once.
+    if (isDefaultWindow) {
+      const legacyCursor = await storeGet(KEYS.REFERENCE_RATE_BACKFILL_CURSOR).catch(() => null);
+      if (legacyCursor && legacyCursor.stage === 'done' && (!cursor || cursor.stage !== 'done')) {
+        cursor = legacyCursor;
+        await storeSet(cursorKey, cursor);
+      }
+    }
+
     if (!cursor) {
       // Skip the Items catalog stage entirely if it's already been stored
       // by a prior run — no need to spend ~17 calls re-fetching the exact
