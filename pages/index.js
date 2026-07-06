@@ -319,18 +319,18 @@ function PFBAlignmentTable({ checks, title }) {
   // comfortably — needed since this table now carries 12 columns.
   const wrapHeader = {padding:'7px 8px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'normal',lineHeight:1.25,verticalAlign:'bottom'};
   const headers = [
-    {label:'Item',        width:110},
-    {label:'PFB Match',   width:null},
-    {label:'Match Type',  width:80,  divider:true},
+    {label:'Item',        width:100},
+    {label:'PFB Match',   width:80},
+    {label:'Match Type',  width:70,  divider:true},
     {label:'Qty',         width:null},
-    {label:'PFB Qty',     width:65},
-    {label:'Qty Status',  width:65},
+    {label:'PFB Qty',     width:60},
+    {label:'Qty Status',  width:60,  divider:true},
     {label:'Rate',        width:null},
     {label:'PFB Rate',    width:null},
-    {label:'Rate Status', width:65},
+    {label:'Rate Status', width:60,  divider:true},
     {label:'Amount',      width:null},
     {label:'PFB Amount',  width:null},
-    {label:'Overall Status', width:75},
+    {label:'Overall Status', width:70},
   ];
   return (
     <div style={{marginBottom:20}}>
@@ -348,15 +348,15 @@ function PFBAlignmentTable({ checks, title }) {
               const pfbAmount = (c.pfbRate!=null && c.pfbQty!=null) ? c.pfbRate * c.pfbQty : null;
               return (
                 <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.status)}}>
-                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:500,maxWidth:110}}>{c.lineItem}</td>
-                  <td style={{padding:'7px 8px',color:'#2563eb',fontSize:12}}>{c.pfbMatch||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:500,maxWidth:100}}>{c.lineItem}</td>
+                  <td style={{padding:'7px 8px',color:'#2563eb',fontSize:12,maxWidth:80,whiteSpace:'normal'}}>{c.pfbMatch||String.fromCharCode(8212)}</td>
                   <td style={Object.assign({padding:'7px 8px',color:'#7c3aed',fontSize:12},divider)}>{c.matchTier?tierLabel(c.matchTier):String.fromCharCode(8212)}</td>
                   <td style={{padding:'7px 8px',color:'#475569'}}>{fmtN(c.qty)}</td>
                   <td style={{padding:'7px 8px',color:'#475569'}}>{c.pfbQty!=null?fmtN(c.pfbQty):String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 8px'}}>{c.qtyStatus?<StatusBadge status={c.qtyStatus}/>:String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 8px'},divider)}>{c.qtyStatus?<StatusBadge status={c.qtyStatus}/>:String.fromCharCode(8212)}</td>
                   <td style={{padding:'7px 8px',color:'#475569'}}>{fmt(c.rate)}</td>
                   <td style={{padding:'7px 8px',color:'#475569'}}>{c.pfbRate!=null?fmt(c.pfbRate):String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 8px'}}>{c.rateStatus?<StatusBadge status={c.rateStatus}/>:String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 8px'},divider)}>{c.rateStatus?<StatusBadge status={c.rateStatus}/>:String.fromCharCode(8212)}</td>
                   <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:600}}>{fmt(c.amount)}</td>
                   <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:600}}>{pfbAmount!=null?fmt(pfbAmount):String.fromCharCode(8212)}</td>
                   <td style={{padding:'7px 8px'}}><StatusBadge status={c.status}/></td>
@@ -381,22 +381,34 @@ function POMatchTable({ checks, title }) {
   if (!checks || !checks.length) return null;
   const divider = {borderRight:'1.5px solid #cbd5e1'};
   const wrapHeader = {padding:'7px 8px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'normal',lineHeight:1.25,verticalAlign:'bottom'};
+  const headers = [
+    {label:'Item',           width:100},
+    {label:'Bill Qty',       width:65},
+    {label:'PO Qty',         width:65},
+    {label:'Qty Status',     width:65, divider:true},
+    {label:'Bill Rate',      width:70},
+    {label:'PO Rate',        width:70},
+    {label:'Rate Status',    width:65, divider:true},
+    {label:'Bill Amount',    width:80},
+    {label:'PO Amount',      width:80},
+    {label:'Overall Status', width:70},
+  ];
   return (
     <div style={{marginBottom:20}}>
       <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title}</h3>
       <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr style={{background:'#eff6ff'}}>
-            {['Item','Bill Qty','PO Qty','Qty Status','Bill Rate','PO Rate','Rate Status','Bill Amount','PO Amount','Overall Status'].map(function(h){
-              const dividerHere = (h==='Item'||h==='Qty Status'||h==='Rate Status') ? divider : null;
-              return <th key={h} style={Object.assign({},wrapHeader,dividerHere)}>{h}</th>;
+            {headers.map(function(h){
+              const dividerHere = (h.label==='Item'||h.divider) ? divider : null;
+              return <th key={h.label} style={Object.assign({},wrapHeader,{maxWidth:h.width},dividerHere)}>{h.label}</th>;
             })}
           </tr></thead>
           <tbody>
             {checks.map(function(c,i){
               return (
                 <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.status)}}>
-                  <td style={Object.assign({padding:'7px 8px',color:'#0f172a',fontWeight:500,maxWidth:160},divider)}>{c.lineItem}</td>
+                  <td style={Object.assign({padding:'7px 8px',color:'#0f172a',fontWeight:500,maxWidth:100},divider)}>{c.lineItem}</td>
                   <td style={{padding:'7px 8px',color:'#475569'}}>{fmtN(c.billQty)}</td>
                   <td style={{padding:'7px 8px',color:'#475569'}}>{c.poQty!=null?fmtN(c.poQty):String.fromCharCode(8212)}</td>
                   <td style={Object.assign({padding:'7px 8px'},divider)}>{c.qtyStatus?<StatusBadge status={c.qtyStatus}/>:String.fromCharCode(8212)}</td>
@@ -503,24 +515,35 @@ function ReferenceRateTable({ checks }) {
   // Dividers after Official Name(1), Account(4), Status(7).
   const dividerCols = new Set([1, 4, 7]);
   const wrapHeader = {padding:'7px 8px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'normal',lineHeight:1.25,verticalAlign:'bottom'};
-  const headers = ['Item Name','Official Name','Project Head','PFB Head','Account',"Today's Rate",'Reference Rate','Status','Last Used Date','Last Used PO/Bill No.'];
+  const headerDefs = [
+    {label:'Item Name', width:130},
+    {label:'Official Name', width:130},
+    {label:'Project Head', width:null},
+    {label:'PFB Head', width:null},
+    {label:'Account', width:null},
+    {label:"Today's Rate", width:null},
+    {label:'Reference Rate', width:null},
+    {label:'Status', width:null},
+    {label:'Last Used Date', width:85},
+    {label:'Last Used PO/Bill No.', width:null},
+  ];
   return (
     <div style={{marginBottom:20}}>
       <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>Reference Rate</h3>
       <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr style={{background:'#eff6ff'}}>
-            {headers.map(function(h,i){
-              const style = Object.assign({}, wrapHeader, dividerCols.has(i)?divider:{});
-              return <th key={h} style={style}>{h}</th>;
+            {headerDefs.map(function(h,i){
+              const style = Object.assign({}, wrapHeader, dividerCols.has(i)?divider:{}, h.width?{maxWidth:h.width}:{});
+              return <th key={h.label} style={style}>{h.label}</th>;
             })}
           </tr></thead>
           <tbody>
             {withHistory.map(function(c,i){
               return (
                 <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.refStatus)}}>
-                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:500,maxWidth:160}}>{c.itemName}</td>
-                  <td style={Object.assign({padding:'7px 8px',color:c.officialNameIsExact?'#0f172a':'#94a3b8',fontStyle:c.officialNameIsExact?'normal':'italic'},divider)}>
+                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:500,maxWidth:130}}>{c.itemName}</td>
+                  <td style={Object.assign({padding:'7px 8px',color:c.officialNameIsExact?'#0f172a':'#94a3b8',fontStyle:c.officialNameIsExact?'normal':'italic',maxWidth:130},divider)}>
                     {c.officialName || String.fromCharCode(8212)}{!c.officialNameIsExact && c.officialName ? ' (closest match)' : ''}
                   </td>
                   <td style={{padding:'7px 8px',color:'#7c3aed',fontSize:12}}>{c.projectHead||String.fromCharCode(8212)}</td>
@@ -1409,7 +1432,7 @@ function ItemsTable({ items, title, subTotal, taxes, total, discount, discountFo
               return (
                 <tr key={i} style={{borderBottom:'1px solid #f1f5f9'}}>
                   <td style={{padding:'6px 10px',color:'#94a3b8',fontSize:11}}>{i+1}</td>
-                  <td style={Object.assign({padding:'6px 10px',color:'#0f172a',fontWeight:500,maxWidth:200},divider)}>{displayName ? compressName(displayName,5) : String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'6px 10px',color:'#0f172a',fontWeight:500,maxWidth:200,whiteSpace:'normal',wordBreak:'break-word'},divider)}>{displayName || String.fromCharCode(8212)}</td>
                   {showSpec && <td style={Object.assign({padding:'6px 10px',color:'#7c3aed',fontSize:12},lastOptionalCol==='spec'?divider:{})}>{li.sku||String.fromCharCode(8212)}</td>}
                   {showProject && <td style={Object.assign({padding:'6px 10px',color:'#2563eb',fontSize:11,fontWeight:600},lastOptionalCol==='project'?divider:{})}>{x.projCode||String.fromCharCode(8212)}</td>}
                   {showLocation && <td style={Object.assign({padding:'6px 10px',color:'#64748b'},lastOptionalCol==='location'?divider:{})}>{li.location_name||String.fromCharCode(8212)}</td>}
