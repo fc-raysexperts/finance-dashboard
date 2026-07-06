@@ -477,15 +477,17 @@ function ReferenceRateTable({ checks }) {
     );
   }
   const divider = { borderRight:'1.5px solid #cbd5e1' };
+  // Dividers now sit after Official Name, Account, and Status (indices 1, 3, 6)
+  const dividerCols = new Set([1, 3, 6]);
   return (
     <div style={{marginBottom:20}}>
       <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>Reference Rate</h3>
       <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr style={{background:'#eff6ff'}}>
-            {['Item Name','Official ZB Name','Tags','Account','Today\'s Rate','Reference Rate','Status','Last Used Date','Last Used P/B No.'].map(function(h,i){
+            {['Item Name','Official Name','Tags','Account','Today\'s Rate','Reference Rate','Status','Last Used Date','Last Used P/B No.'].map(function(h,i){
               const style = {padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'};
-              if (i===0 || i===5) Object.assign(style, divider);
+              if (dividerCols.has(i)) Object.assign(style, divider);
               return <th key={h} style={style}>{h}</th>;
             })}
           </tr></thead>
@@ -493,15 +495,22 @@ function ReferenceRateTable({ checks }) {
             {withHistory.map(function(c,i){
               return (
                 <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.refStatus)}}>
-                  <td style={Object.assign({padding:'7px 10px',color:'#0f172a',fontWeight:500,maxWidth:180},divider)}>{c.itemName}</td>
-                  <td style={{padding:'7px 10px',color:c.officialNameIsExact?'#0f172a':'#94a3b8',fontStyle:c.officialNameIsExact?'normal':'italic'}}>
+                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:500,maxWidth:180}}>{c.itemName}</td>
+                  <td style={Object.assign({padding:'7px 10px',color:c.officialNameIsExact?'#0f172a':'#94a3b8',fontStyle:c.officialNameIsExact?'normal':'italic'},divider)}>
                     {c.officialName || String.fromCharCode(8212)}{!c.officialNameIsExact && c.officialName ? ' (closest match)' : ''}
                   </td>
-                  <td style={{padding:'7px 10px',color:'#7c3aed',fontSize:12}}>{c.tags||String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',color:'#64748b',fontSize:12}}>{c.account||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 10px',color:'#7c3aed',fontSize:12}}>
+                    {c.tags && c.tags.length>0
+                      ? c.tags.map(function(t,ti){ return <div key={ti}>{t}</div>; })
+                      : String.fromCharCode(8212)}
+                  </td>
+                  <td style={Object.assign({padding:'7px 10px',color:'#64748b',fontSize:12},divider)}>{c.account||String.fromCharCode(8212)}</td>
                   <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:600}}>{fmt(c.currentRate)}</td>
-                  <td style={Object.assign({padding:'7px 10px',color:'#0f172a',fontWeight:700},divider)}>{c.refRateUsed!=null?fmt(c.refRateUsed):String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px'}}><StatusBadge status={c.refStatus}/></td>
+                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:700}}>
+                    {c.refRateUsed!=null?fmt(c.refRateUsed):String.fromCharCode(8212)}
+                    {c.usedCrossSource && <div style={{fontSize:10,color:'#94a3b8',fontWeight:400}}>(blended PO+Bill)</div>}
+                  </td>
+                  <td style={Object.assign({padding:'7px 10px'},divider)}><StatusBadge status={c.refStatus}/></td>
                   <td style={{padding:'7px 10px',color:'#64748b',fontSize:12}}>{toIndianDate(c.lastUsedDate)}</td>
                   <td style={{padding:'7px 10px',color:'#2563eb',fontSize:12}}>{c.lastUsedDocNumber||String.fromCharCode(8212)}</td>
                 </tr>

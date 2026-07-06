@@ -1,0 +1,23 @@
+name: Sync Reference Rates
+
+# Runs automatically every 6 hours, all day, every day - no manual
+# triggering needed. GitHub Actions' scheduled workflows are free for
+# public repos and cost nothing extra to run. Uses the exact same
+# mechanism planned for Phase 5's notification emails, brought forward
+# now since it directly solves the "this should be automatic" request.
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours, at minute 0
+  workflow_dispatch:         # also lets you trigger it manually from GitHub's Actions tab, if you ever want to
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the Reference Rate sync endpoint
+        run: |
+          curl -s "https://finance-dashboard-liard-three.vercel.app/api/sync-reference-rates?key=check123" \
+            -o response.json
+          cat response.json
+          echo ""
+          echo "Sync complete."
