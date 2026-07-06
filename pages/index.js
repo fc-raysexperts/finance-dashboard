@@ -314,32 +314,52 @@ function PFBAlignmentTable({ checks, title }) {
   if (!checks || !checks.length) return null;
   const tierLabel = function(t){ return t===1?'Name match':t===2?'Tag match':t===3?'Tag+disambig':String.fromCharCode(8212); };
   const divider = {borderRight:'1.5px solid #cbd5e1'};
+  // Any header with more than one word wraps onto 2 lines (whiteSpace
+  // normal instead of nowrap), with a taller header row to fit it
+  // comfortably — needed since this table now carries 12 columns.
+  const wrapHeader = {padding:'7px 8px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'normal',lineHeight:1.25,verticalAlign:'bottom'};
+  const headers = [
+    {label:'Item',        width:110},
+    {label:'PFB Match',   width:null},
+    {label:'Match Type',  width:80,  divider:true},
+    {label:'Qty',         width:null},
+    {label:'PFB Qty',     width:65},
+    {label:'Qty Status',  width:65},
+    {label:'Rate',        width:null},
+    {label:'PFB Rate',    width:null},
+    {label:'Rate Status', width:65},
+    {label:'Amount',      width:null},
+    {label:'PFB Amount',  width:null},
+    {label:'Overall Status', width:75},
+  ];
   return (
     <div style={{marginBottom:20}}>
       <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title}</h3>
       <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr style={{background:'#eff6ff'}}>
-            {['Item','Qty','PFB Qty','Qty Status','Rate','PFB Rate','Rate Status','PFB Match','Match Type','Amount','Overall'].map(function(h){
-              const dividerHere = (h==='Item'||h==='Qty Status'||h==='Rate Status'||h==='Match Type') ? divider : null;
-              return <th key={h} style={Object.assign({padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'},dividerHere)}>{h}</th>;
+            {headers.map(function(h){
+              const style = Object.assign({}, wrapHeader, h.divider?divider:{}, h.width?{maxWidth:h.width}:{});
+              return <th key={h.label} style={style}>{h.label}</th>;
             })}
           </tr></thead>
           <tbody>
             {checks.map(function(c,i){
+              const pfbAmount = (c.pfbRate!=null && c.pfbQty!=null) ? c.pfbRate * c.pfbQty : null;
               return (
                 <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.status)}}>
-                  <td style={Object.assign({padding:'7px 10px',color:'#0f172a',fontWeight:500,maxWidth:160},divider)}>{c.lineItem}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{fmtN(c.qty)}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.pfbQty!=null?fmtN(c.pfbQty):String.fromCharCode(8212)}</td>
-                  <td style={Object.assign({padding:'7px 10px'},divider)}>{c.qtyStatus?<StatusBadge status={c.qtyStatus}/>:String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{fmt(c.rate)}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.pfbRate!=null?fmt(c.pfbRate):String.fromCharCode(8212)}</td>
-                  <td style={Object.assign({padding:'7px 10px'},divider)}>{c.rateStatus?<StatusBadge status={c.rateStatus}/>:String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',color:'#2563eb',fontSize:12}}>{c.pfbMatch||String.fromCharCode(8212)}</td>
-                  <td style={Object.assign({padding:'7px 10px',color:'#7c3aed',fontSize:12},divider)}>{c.matchTier?tierLabel(c.matchTier):String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:600}}>{fmt(c.amount)}</td>
-                  <td style={{padding:'7px 10px'}}><StatusBadge status={c.status}/></td>
+                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:500,maxWidth:110}}>{c.lineItem}</td>
+                  <td style={{padding:'7px 8px',color:'#2563eb',fontSize:12}}>{c.pfbMatch||String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 8px',color:'#7c3aed',fontSize:12},divider)}>{c.matchTier?tierLabel(c.matchTier):String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px',color:'#475569'}}>{fmtN(c.qty)}</td>
+                  <td style={{padding:'7px 8px',color:'#475569'}}>{c.pfbQty!=null?fmtN(c.pfbQty):String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px'}}>{c.qtyStatus?<StatusBadge status={c.qtyStatus}/>:String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px',color:'#475569'}}>{fmt(c.rate)}</td>
+                  <td style={{padding:'7px 8px',color:'#475569'}}>{c.pfbRate!=null?fmt(c.pfbRate):String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px'}}>{c.rateStatus?<StatusBadge status={c.rateStatus}/>:String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:600}}>{fmt(c.amount)}</td>
+                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:600}}>{pfbAmount!=null?fmt(pfbAmount):String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px'}}><StatusBadge status={c.status}/></td>
                 </tr>
               );
             })}
@@ -360,31 +380,32 @@ function PFBAlignmentTable({ checks, title }) {
 function POMatchTable({ checks, title }) {
   if (!checks || !checks.length) return null;
   const divider = {borderRight:'1.5px solid #cbd5e1'};
+  const wrapHeader = {padding:'7px 8px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'normal',lineHeight:1.25,verticalAlign:'bottom'};
   return (
     <div style={{marginBottom:20}}>
       <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title}</h3>
       <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr style={{background:'#eff6ff'}}>
-            {['Item','Bill Qty','PO Qty','Qty Status','Bill Rate','PO Rate','Rate Status','Bill Amount','PO Amount','Overall'].map(function(h){
+            {['Item','Bill Qty','PO Qty','Qty Status','Bill Rate','PO Rate','Rate Status','Bill Amount','PO Amount','Overall Status'].map(function(h){
               const dividerHere = (h==='Item'||h==='Qty Status'||h==='Rate Status') ? divider : null;
-              return <th key={h} style={Object.assign({padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'},dividerHere)}>{h}</th>;
+              return <th key={h} style={Object.assign({},wrapHeader,dividerHere)}>{h}</th>;
             })}
           </tr></thead>
           <tbody>
             {checks.map(function(c,i){
               return (
                 <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.status)}}>
-                  <td style={Object.assign({padding:'7px 10px',color:'#0f172a',fontWeight:500,maxWidth:160},divider)}>{c.lineItem}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{fmtN(c.billQty)}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.poQty!=null?fmtN(c.poQty):String.fromCharCode(8212)}</td>
-                  <td style={Object.assign({padding:'7px 10px'},divider)}>{c.qtyStatus?<StatusBadge status={c.qtyStatus}/>:String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{fmt(c.billRate)}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.poRate!=null?fmt(c.poRate):String.fromCharCode(8212)}</td>
-                  <td style={Object.assign({padding:'7px 10px'},divider)}>{c.rateStatus?<StatusBadge status={c.rateStatus}/>:String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:600}}>{fmt(c.billAmount)}</td>
-                  <td style={{padding:'7px 10px',color:'#475569'}}>{c.poAmount!=null?fmt(c.poAmount):String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px'}}><StatusBadge status={c.status}/></td>
+                  <td style={Object.assign({padding:'7px 8px',color:'#0f172a',fontWeight:500,maxWidth:160},divider)}>{c.lineItem}</td>
+                  <td style={{padding:'7px 8px',color:'#475569'}}>{fmtN(c.billQty)}</td>
+                  <td style={{padding:'7px 8px',color:'#475569'}}>{c.poQty!=null?fmtN(c.poQty):String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 8px'},divider)}>{c.qtyStatus?<StatusBadge status={c.qtyStatus}/>:String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px',color:'#475569'}}>{fmt(c.billRate)}</td>
+                  <td style={{padding:'7px 8px',color:'#475569'}}>{c.poRate!=null?fmt(c.poRate):String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 8px'},divider)}>{c.rateStatus?<StatusBadge status={c.rateStatus}/>:String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:600}}>{fmt(c.billAmount)}</td>
+                  <td style={{padding:'7px 8px',color:'#475569'}}>{c.poAmount!=null?fmt(c.poAmount):String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px'}}><StatusBadge status={c.status}/></td>
                 </tr>
               );
             })}
@@ -477,17 +498,20 @@ function ReferenceRateTable({ checks }) {
     );
   }
   const divider = { borderRight:'1.5px solid #cbd5e1' };
-  // Dividers now sit after Official Name, Account, and Status (indices 1, 3, 6)
-  const dividerCols = new Set([1, 3, 6]);
+  // New order: Item Name | Official Name | Project Head | PFB Head | Account
+  // | Today's Rate | Reference Rate | Status | Last Used Date | Last Used PO/Bill No.
+  // Dividers after Official Name(1), Account(4), Status(7).
+  const dividerCols = new Set([1, 4, 7]);
+  const wrapHeader = {padding:'7px 8px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'normal',lineHeight:1.25,verticalAlign:'bottom'};
+  const headers = ['Item Name','Official Name','Project Head','PFB Head','Account',"Today's Rate",'Reference Rate','Status','Last Used Date','Last Used PO/Bill No.'];
   return (
     <div style={{marginBottom:20}}>
       <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>Reference Rate</h3>
       <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr style={{background:'#eff6ff'}}>
-            {['Item Name','Official Name','Tags','Account','Today\'s Rate','Reference Rate','Status','Last Used Date','Last Used P/B No.'].map(function(h,i){
-              const style = {padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'};
-              if (dividerCols.has(i)) Object.assign(style, divider);
+            {headers.map(function(h,i){
+              const style = Object.assign({}, wrapHeader, dividerCols.has(i)?divider:{});
               return <th key={h} style={style}>{h}</th>;
             })}
           </tr></thead>
@@ -495,24 +519,21 @@ function ReferenceRateTable({ checks }) {
             {withHistory.map(function(c,i){
               return (
                 <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.refStatus)}}>
-                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:500,maxWidth:180}}>{c.itemName}</td>
-                  <td style={Object.assign({padding:'7px 10px',color:c.officialNameIsExact?'#0f172a':'#94a3b8',fontStyle:c.officialNameIsExact?'normal':'italic'},divider)}>
+                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:500,maxWidth:160}}>{c.itemName}</td>
+                  <td style={Object.assign({padding:'7px 8px',color:c.officialNameIsExact?'#0f172a':'#94a3b8',fontStyle:c.officialNameIsExact?'normal':'italic'},divider)}>
                     {c.officialName || String.fromCharCode(8212)}{!c.officialNameIsExact && c.officialName ? ' (closest match)' : ''}
                   </td>
-                  <td style={{padding:'7px 10px',color:'#7c3aed',fontSize:12}}>
-                    {c.tags && c.tags.length>0
-                      ? c.tags.map(function(t,ti){ return <div key={ti}>{t}</div>; })
-                      : String.fromCharCode(8212)}
-                  </td>
-                  <td style={Object.assign({padding:'7px 10px',color:'#64748b',fontSize:12},divider)}>{c.account||String.fromCharCode(8212)}</td>
-                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:600}}>{fmt(c.currentRate)}</td>
-                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:700}}>
+                  <td style={{padding:'7px 8px',color:'#7c3aed',fontSize:12}}>{c.projectHead||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px',color:'#7c3aed',fontSize:12}}>{c.pfbHead||String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 8px',color:'#64748b',fontSize:12},divider)}>{c.account||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:600}}>{fmt(c.currentRate)}</td>
+                  <td style={{padding:'7px 8px',color:'#0f172a',fontWeight:700}}>
                     {c.refRateUsed!=null?fmt(c.refRateUsed):String.fromCharCode(8212)}
                     {c.usedCrossSource && <div style={{fontSize:10,color:'#94a3b8',fontWeight:400}}>(blended PO+Bill)</div>}
                   </td>
-                  <td style={Object.assign({padding:'7px 10px'},divider)}><StatusBadge status={c.refStatus}/></td>
-                  <td style={{padding:'7px 10px',color:'#64748b',fontSize:12}}>{toIndianDate(c.lastUsedDate)}</td>
-                  <td style={{padding:'7px 10px',color:'#2563eb',fontSize:12}}>{c.lastUsedDocNumber||String.fromCharCode(8212)}</td>
+                  <td style={Object.assign({padding:'7px 8px'},divider)}><StatusBadge status={c.refStatus}/></td>
+                  <td style={{padding:'7px 8px',color:'#64748b',fontSize:12}}>{toIndianDate(c.lastUsedDate)}</td>
+                  <td style={{padding:'7px 8px',color:'#2563eb',fontSize:12}}>{c.lastUsedDocNumber||String.fromCharCode(8212)}</td>
                 </tr>
               );
             })}
