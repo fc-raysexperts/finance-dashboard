@@ -12,9 +12,10 @@
 // proven smart-delta-cache version) does all the list/detail/approver work.
 
 import { getPendingPOs } from '../../lib/zoho';
-import { generatePFB, checkPOAlignment, isSevere, isCaution } from '../../lib/pfbEngine';
+import { generatePFB, checkPOAlignment, isSevere, isCaution, nameSimilarity } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runPOCompliance, getComplianceStatus } from '../../lib/checklistEngine';
+import { buildReferenceRateRow } from '../../lib/referenceRates';
 const { storeGet, KEYS } = require('../../lib/store');
 
 export default async function handler(req, res) {
@@ -35,6 +36,11 @@ export default async function handler(req, res) {
     const forceRefresh = req.query.refresh === '1';
     const pos = await getPendingPOs(forceRefresh);
     console.log(`pos: ${pos.length} currently pending Jatin's approval`);
+
+    // Reference Rate data loaded ONCE per request, not per-PO - shared
+    // across every PO in this response.
+    const rrCatalog = await storeGet(KEYS.REFERENCE_RATE_CATALOG).catch(() => null) || {};
+    const rrHistory = await storeGet(KEYS.REFERENCE_RATE_HISTORY).catch(() => null) || {};
 
     const enriched = pos.map(po => {
       const lineItems = po.line_items || [];
@@ -93,6 +99,14 @@ export default async function handler(req, res) {
         }
       }
 
+      // ── REFERENCE RATE CHECKS — independent of PFB alignment entirely,
+      // shown in its own dedicated table, not mixed into the PFB/PO Match
+      // tables. Every line item gets checked, regardless of whether it
+      // also happens to match a PFB scope item.
+      const referenceRateChecks = lineItems
+        .map(li => buildReferenceRateRow(li, 'po', rrCatalog, rrHistory, nameSimilarity, new Date().toISOString()))
+        .filter(Boolean);
+
       // ── COMPLIANCE CHECK (always runs, regardless of PFB) — now passes
       // pfbTotal for the new Budget Availability check.
       const compliance       = runPOCompliance(po, pfbTotal);
@@ -150,6 +164,7 @@ export default async function handler(req, res) {
           po.delivery_address.country,
         ].filter(Boolean).join(', ') : '',
         subject: (po.custom_fields || []).find(f => /subject/i.test(f.label || f.placeholder || ''))?.value || '',
+        referenceRateChecks,
         // Quotation and this document-level Project label are both visible
         // on the real sample PO but aren't standard Books fields — same
         // defensive custom-field lookup approach as Subject above.

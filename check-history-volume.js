@@ -68,34 +68,20 @@ async function main() {
   console.log('────────────────────────────────────────────');
 
   try {
-    console.log('Counting POs/Bills from 1 Apr 2026 onwards...');
-    const poApr   = await countByPagination(token, '/purchaseorders', 'purchaseorders', { date_start: '2026-04-01' });
-    const billApr = await countByPagination(token, '/bills', 'bills', { date_start: '2026-04-01' });
-
-    console.log('Counting POs/Bills from 1 Jan 2026 onwards...');
-    const poJan   = await countByPagination(token, '/purchaseorders', 'purchaseorders', { date_start: '2026-01-01' });
-    const billJan = await countByPagination(token, '/bills', 'bills', { date_start: '2026-01-01' });
-
-    console.log('Counting the Items catalog...');
-    let activeCount = 0, inactiveCount = 0;
-    const items = await countByPagination(token, '/items', 'items', {}, (records) => {
-      records.forEach(r => { if (r.status === 'active') activeCount++; else inactiveCount++; });
-    });
+    console.log('Counting POs/Bills from 1 Jul 2025 to 31 Dec 2025 (the new candidate window)...');
+    const poWindow   = await countByPagination(token, '/purchaseorders', 'purchaseorders', { date_start: '2025-07-01', date_end: '2025-12-31' });
+    const billWindow = await countByPagination(token, '/bills', 'bills', { date_start: '2025-07-01', date_end: '2025-12-31' });
 
     console.log('');
-    console.log('=== Candidate backfill windows ===');
-    console.log('From 1 Apr 2026 (3 months): POs', poApr.total, '+ Bills', billApr.total, '=', poApr.total + billApr.total, 'documents  (', poApr.callCount + billApr.callCount, 'list calls to measure)');
-    console.log('From 1 Jan 2026 (6 months): POs', poJan.total, '+ Bills', billJan.total, '=', poJan.total + billJan.total, 'documents  (', poJan.callCount + billJan.callCount, 'list calls to measure)');
+    console.log('=== 1 Jul 2025 - 31 Dec 2025 (6 months, the extension being considered) ===');
+    console.log('POs:', poWindow.total, '| Bills:', billWindow.total, '| Combined:', poWindow.total + billWindow.total, 'documents');
+    console.log('(measured via', poWindow.callCount + billWindow.callCount, 'list calls — no document detail fetched)');
     console.log('');
-    console.log('=== Items catalog (Zoho\'s own official item list) ===');
-    console.log('Active items:', activeCount, '| Inactive items:', inactiveCount, '| Total:', items.total);
+    console.log('For comparison, your two already-completed windows:');
+    console.log('  Apr-Jun 2026 (3mo): 2,035 documents — found 573 new items');
+    console.log('  Jan-Mar 2026 (3mo): 2,209 documents — found 333 additional new items');
     console.log('');
-    console.log('Note: this tells us how many documents would need detail-fetching');
-    console.log('for each window — it does NOT yet tell us how many of the', items.total,
-      'catalog items would actually be COVERED by that window (that requires really');
-    console.log('inspecting each document\'s line items, which is the real backfill');
-    console.log('itself). Once you pick a window, running that backfill will report');
-    console.log('real coverage against this item count as it goes.');
+    console.log('A full backfill of this new window would cost roughly', poWindow.total + billWindow.total, 'API calls (1 detail call per document).');
   } catch (e) {
     console.log('Error counting:', e.response?.data || e.message);
   }

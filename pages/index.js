@@ -464,7 +464,57 @@ function POBreakupTable({ rows, kind }) {
   );
 }
 
-// ----- SUMMARY CARD -----
+// ----- REFERENCE RATE TABLE (new, dedicated - kept separate from PFB
+// Alignment / PO Match tables) -----
+function ReferenceRateTable({ checks }) {
+  if (!checks || checks.length === 0) return null;
+  const withHistory = checks.filter(c => c.hasHistory);
+  if (withHistory.length === 0) {
+    return (
+      <div style={{background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:8,padding:'10px 14px',marginBottom:20,fontSize:13,color:'#9a3412'}}>
+        <b>Reference Rate not available:</b> none of this document's items have any recorded price history yet — nothing to compare against.
+      </div>
+    );
+  }
+  const divider = { borderRight:'1.5px solid #cbd5e1' };
+  return (
+    <div style={{marginBottom:20}}>
+      <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>Reference Rate</h3>
+      <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+          <thead><tr style={{background:'#eff6ff'}}>
+            {['Item Name','Official ZB Name','Tags','Account','Today\'s Rate','Reference Rate','Status','Last Used Date','Last Used P/B No.'].map(function(h,i){
+              const style = {padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'};
+              if (i===0 || i===5) Object.assign(style, divider);
+              return <th key={h} style={style}>{h}</th>;
+            })}
+          </tr></thead>
+          <tbody>
+            {withHistory.map(function(c,i){
+              return (
+                <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:rowTint(c.refStatus)}}>
+                  <td style={Object.assign({padding:'7px 10px',color:'#0f172a',fontWeight:500,maxWidth:180},divider)}>{c.itemName}</td>
+                  <td style={{padding:'7px 10px',color:c.officialNameIsExact?'#0f172a':'#94a3b8',fontStyle:c.officialNameIsExact?'normal':'italic'}}>
+                    {c.officialName || String.fromCharCode(8212)}{!c.officialNameIsExact && c.officialName ? ' (closest match)' : ''}
+                  </td>
+                  <td style={{padding:'7px 10px',color:'#7c3aed',fontSize:12}}>{c.tags||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 10px',color:'#64748b',fontSize:12}}>{c.account||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 10px',color:'#0f172a',fontWeight:600}}>{fmt(c.currentRate)}</td>
+                  <td style={Object.assign({padding:'7px 10px',color:'#0f172a',fontWeight:700},divider)}>{c.refRateUsed!=null?fmt(c.refRateUsed):String.fromCharCode(8212)}</td>
+                  <td style={{padding:'7px 10px'}}><StatusBadge status={c.refStatus}/></td>
+                  <td style={{padding:'7px 10px',color:'#64748b',fontSize:12}}>{toIndianDate(c.lastUsedDate)}</td>
+                  <td style={{padding:'7px 10px',color:'#2563eb',fontSize:12}}>{c.lastUsedDocNumber||String.fromCharCode(8212)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+
 function Card({ label, value, sub, color, icon }) {
   return (
     <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,padding:'14px 18px',borderTop:'3px solid ' + (color||'#e2e8f0'),overflow:'hidden',minWidth:0}}>
@@ -1352,13 +1402,17 @@ function ItemsTable({ items, title, subTotal, taxes, total, discount, discountFo
                 </div>
               </td>
             </tr>
-            {/* Row 2: taxes + Total (plus any deduction placed here). */}
+            {/* Row 2: taxes + Total (plus any deduction placed here). Real
+                bug fixed: marginLeft:'auto' on Total was interfering with
+                how space-between distributes the OTHER items (deductions/
+                taxes), bunching them to the left instead of spreading
+                evenly - removed, now behaves exactly like Row 1. */}
             <tr style={{background:'#fefce8'}}>
               <td colSpan={colCount} style={{padding:'8px 16px 10px'}}>
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:18,flexWrap:'wrap'}}>
                   {row2Items.map(function(pair,i){
                     const isTotal = pair[0]==='Total';
-                    return <span key={i} style={isTotal?{fontSize:14,color:'#713f12',fontWeight:800,marginLeft:'auto'}:{fontSize:13,color:'#854d0e'}}><b>{pair[0]}:</b> {pair[1]}</span>;
+                    return <span key={i} style={isTotal?{fontSize:14,color:'#713f12',fontWeight:800}:{fontSize:13,color:'#854d0e'}}><b>{pair[0]}:</b> {pair[1]}</span>;
                   })}
                 </div>
               </td>
@@ -1497,7 +1551,14 @@ function DetailModal({ item, type, onClose }) {
     ['Bill Type', item.billType||String.fromCharCode(8212)],
   ];
 
-  const projectNames = (item.projectZoho && item.projectZoho.length) ? item.projectZoho : [];
+  // Real bug fixed: this previously used item.projectZoho, a SEPARATELY
+  // computed backend field that could drift out of sync with what's
+  // actually shown in the Items Table below (confirmed: a real Bill
+  // showed LE0215_MIRACLE correctly in its Items Table but not here).
+  // Now derived directly from the SAME line items the Items Table reads,
+  // guaranteeing the two can never disagree.
+  const itemsForProjects = item.lineItems || item.line_items || [];
+  const projectNames = [...new Set(itemsForProjects.map(li => li.project_name).filter(Boolean))];
   // pos.js stores PFB checks as `lineChecks`, bills.js as `pfbLineChecks` —
   // covering both so the PFB Alignment table doesn't end up silently empty
   // for one of the two types.
@@ -1511,10 +1572,12 @@ function DetailModal({ item, type, onClose }) {
       subtitle={item.vendor}>
       {projectNames.length > 0 && (
         <div style={{background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:8,padding:'10px 14px',marginBottom:14}}>
-          <div style={{fontSize:10,color:'#0369a1',fontWeight:700,letterSpacing:'0.08em',marginBottom:4}}>PROJECT(S) IN ZOHO</div>
-          {projectNames.map(function(n,i){
-            return <div key={i} style={{fontSize:13,color:'#0f172a',fontWeight:500,marginBottom:2}}>{n}</div>;
-          })}
+          <div style={{fontSize:10,color:'#0369a1',fontWeight:700,letterSpacing:'0.08em',marginBottom:6}}>PROJECT(S) IN ZOHO</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'6px 16px'}}>
+            {projectNames.map(function(n,i){
+              return <div key={i} style={{fontSize:13,color:'#0f172a',fontWeight:500,wordBreak:'break-word'}}>{n}</div>;
+            })}
+          </div>
         </div>
       )}
       {isPMO ? (
@@ -1581,6 +1644,7 @@ function DetailModal({ item, type, onClose }) {
         </div>
       )}
       {isBill && item.poLineChecks && item.poLineChecks.length>0 && <POMatchTable checks={item.poLineChecks} title="PO Match - Line by Line"/>}
+      {!isPMO && <ReferenceRateTable checks={item.referenceRateChecks}/>}
       {isPMO && item.alignment && item.alignment.checks && item.alignment.checks.length>0 && <CompTable checks={item.alignment.checks} title="PI / Bill Alignment"/>}
       {isPMO ? (
         item.attachmentId

@@ -20,6 +20,7 @@ import { getPendingBills, getCachedPODetail, getPendingPOs } from '../../lib/zoh
 import { generatePFB, checkPOAlignment, nameSimilarity, compareValue, isSevere, isCaution } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runBillCompliance, getComplianceStatus } from '../../lib/checklistEngine';
+import { buildReferenceRateRow } from '../../lib/referenceRates';
 const { storeGet, KEYS } = require('../../lib/store');
 
 // Items that legitimately have no PO — used so the "no reference" message
@@ -85,6 +86,10 @@ export default async function handler(req, res) {
       const pos = await getPendingPOs();
       recentPONumbers = pos.map(p => p.purchaseorder_number);
     } catch {}
+
+    // Reference Rate data loaded ONCE per request, not per-Bill.
+    const rrCatalog = await storeGet(KEYS.REFERENCE_RATE_CATALOG).catch(() => null) || {};
+    const rrHistory = await storeGet(KEYS.REFERENCE_RATE_HISTORY).catch(() => null) || {};
 
     // 2. Enrich each bill in parallel
     const enriched = await Promise.all(bills.map(async bill => {
@@ -174,6 +179,11 @@ export default async function handler(req, res) {
       }
 
       // ── COMPLIANCE CHECK (always runs) ────────────────────
+      // ── REFERENCE RATE CHECKS — independent of PFB/PO alignment.
+      const referenceRateChecks = lineItems
+        .map(li => buildReferenceRateRow(li, 'bill', rrCatalog, rrHistory, nameSimilarity, new Date().toISOString()))
+        .filter(Boolean);
+
       const compliance       = runBillCompliance(bill, linkedPO || linkedPORef, pfbTotal);
       const complianceStatus = getComplianceStatus(compliance);
 
@@ -236,6 +246,7 @@ export default async function handler(req, res) {
         originalReferenceBillNumber: (bill.custom_fields || []).find(f => /original reference bill/i.test(f.label || f.placeholder || ''))?.value || '',
         billProjectName: (bill.custom_fields || []).find(f => /project name/i.test(f.label || f.placeholder || ''))?.value || '',
         billSubject: (bill.custom_fields || []).find(f => /subject/i.test(f.label || f.placeholder || ''))?.value || '',
+        referenceRateChecks,
         accountsPayable: (bill.custom_fields || []).find(f => /accounts payable/i.test(f.label || f.placeholder || ''))?.value || '',
         discount: bill.discount || 0,
         discountFormatted: bill.discount_type === 'percentage' ? `${bill.discount}%` : (bill.discount ? `${bill.currency_symbol||'₹'}${bill.discount}` : ''),

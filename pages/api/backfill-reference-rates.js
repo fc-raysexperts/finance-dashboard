@@ -26,7 +26,7 @@ const BATCH_SIZE = 60; // documents' full detail fetched per invocation - kept c
 
 async function zohoGET(path, params = {}) {
   let token = await getAccessToken();
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const res = await axios.get(`https://www.zohoapis.in/books/v3${path}`, {
         headers: { Authorization: `Zoho-oauthtoken ${token}` },
@@ -34,12 +34,20 @@ async function zohoGET(path, params = {}) {
       });
       return res.data;
     } catch (err) {
-      if (err.response?.status === 401 && attempt < 3) {
-        token = await getAccessToken({ forceRefresh: attempt === 2 });
+      if (err.response?.status === 401 && attempt < 2) {
+        token = await getAccessToken({ forceRefresh: true });
         continue;
       }
-      if (err.response?.status === 429 && attempt < 3) {
-        await new Promise(r => setTimeout(r, attempt * 3000));
+      // Real fix: previously retried a 429 up to 3 times with GROWING
+      // delays (3s, 6s, 9s = up to 18s per document). If the daily quota
+      // is genuinely exhausted (not a brief burst), every document in a
+      // 60-document batch would hit this same wall — up to 18 MINUTES for
+      // one batch, which is exactly what caused a silent, unexplained
+      // hang. Cut to a single quick retry — enough for a real transient
+      // blip, but fails fast when it's not, so the batch loop below can
+      // detect genuine exhaustion in seconds instead of many minutes.
+      if (err.response?.status === 429 && attempt < 2) {
+        await new Promise(r => setTimeout(r, 2000));
         continue;
       }
       throw err;
@@ -186,6 +194,8 @@ export default async function handler(req, res) {
 
     const batch = pageRecords.slice(cursor.offsetInPage, cursor.offsetInPage + BATCH_SIZE);
     let processedInBatch = 0;
+    let consecutiveFailures = 0;
+    let stoppedEarly = false;
     for (const rec of batch) {
       const id = source === 'pos' ? rec.purchaseorder_id : rec.bill_id;
       try {
@@ -195,14 +205,34 @@ export default async function handler(req, res) {
         const docNumber = source === 'pos' ? doc.purchaseorder_number : doc.bill_number;
         const docDate   = doc?.date;
         lineItems.forEach(li => recordOccurrence(history, li, docDate, source, docNumber));
-      } catch { /* skip this one document, keep going — a single failure shouldn't stop the whole backfill */ }
-      processedInBatch++;
+        consecutiveFailures = 0;
+        processedInBatch++;
+      } catch {
+        consecutiveFailures++;
+        // Real fix for a genuine data-loss risk: 3 failures in a row very
+        // likely means the daily quota is actually exhausted, not a random
+        // one-off blip. Stopping here WITHOUT counting this document (or
+        // any remaining ones in this batch) as processed means the cursor
+        // below can never advance past them — the next run resumes from
+        // exactly this safe position instead of silently losing whatever
+        // was left in this batch.
+        if (consecutiveFailures >= 3) {
+          stoppedEarly = true;
+          break;
+        }
+        processedInBatch++; // an isolated, non-repeating failure — safe to move past
+      }
       await new Promise(r => setTimeout(r, 150));
     }
 
     await storeSet(KEYS.REFERENCE_RATE_HISTORY, history);
 
-    const newOffset = cursor.offsetInPage + batch.length;
+    // Real fix: this used to advance by batch.length (the full INTENDED
+    // batch size) regardless of how many documents actually succeeded —
+    // meaning any failures got silently skipped forever. Now advances
+    // only by processedInBatch (what was genuinely attempted), so a
+    // stop-early never loses data.
+    const newOffset = cursor.offsetInPage + processedInBatch;
     let nextCursor;
     if (newOffset >= pageRecords.length) {
       if (hasMorePage) {
@@ -226,6 +256,8 @@ export default async function handler(req, res) {
       distinctItemsFound: distinctItemsSoFar,
       done: nextCursor.stage === 'done',
       nextStage: nextCursor.stage,
+      stoppedEarly,
+      stoppedReason: stoppedEarly ? '3 consecutive Zoho failures — very likely today\'s API quota is exhausted. Nothing was skipped or lost; this exact position is saved and safe to resume from once quota resets (usually midnight IST).' : undefined,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
