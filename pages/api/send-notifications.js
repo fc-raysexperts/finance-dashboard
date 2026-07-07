@@ -25,11 +25,19 @@ const KNOWN_IDS_KEY = 'notification_known_ids';
 
 async function zohoGET(path, params = {}) {
   const token = await getAccessToken();
-  const res = await axios.get(`https://www.zohoapis.in/books/v3${path}`, {
-    headers: { Authorization: `Zoho-oauthtoken ${token}` },
-    params: { organization_id: process.env.ZOHO_ORG_ID, ...params },
-  });
-  return res.data;
+  try {
+    const res = await axios.get(`https://www.zohoapis.in/books/v3${path}`, {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+      params: { organization_id: process.env.ZOHO_ORG_ID, ...params },
+    });
+    return res.data;
+  } catch (e) {
+    // Real fix: surface Zoho's actual error message, not just the bare
+    // status code - this is what let us finally pin down the wrong
+    // filter parameter below instead of guessing again.
+    const detail = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+    throw new Error(`Zoho ${path} failed: ${e.response?.status || ''} - ${detail}`);
+  }
 }
 
 // Fetches ALL company-wide pending POs/Bills (not just Jatin's own),
@@ -38,8 +46,8 @@ async function zohoGET(path, params = {}) {
 // come up" as stated. PMOs use the existing custom-module pending list.
 async function getCurrentPendingIds() {
   const [poData, billData] = await Promise.all([
-    zohoGET('/purchaseorders', { filter_by: 'Status.PendingApproval', per_page: 200 }),
-    zohoGET('/bills', { filter_by: 'Status.PendingApproval', per_page: 200 }),
+    zohoGET('/purchaseorders', { status: 'pending_approval', per_page: 200 }),
+    zohoGET('/bills', { status: 'pending_approval', per_page: 200 }),
   ]);
   const pos   = (poData.purchaseorders || []).map(p => p.purchaseorder_id);
   const bills = (billData.bills || []).map(b => b.bill_id);
