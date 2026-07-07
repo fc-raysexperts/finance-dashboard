@@ -41,6 +41,24 @@ export default async function handler(req, res) {
     let page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
     let y = PAGE_HEIGHT - MARGIN;
 
+
+    // Real fix: pdf-lib's standard fonts (WinAnsi encoding) can't render
+    // arrows, most symbols/emoji, or various Unicode punctuation - this
+    // sanitizes ALL text before drawing, replacing known problematic
+    // characters with safe equivalents and stripping anything else
+    // outside WinAnsi's supported range, so this can't crash again
+    // regardless of what characters show up in the underlying data.
+    function sanitizeText(str) {
+      return String(str ?? '-')
+        .replace(/[\u2192\u2190\u2191\u2193]/g, '->')  // arrows
+        .replace(/[\u2018\u2019]/g, "'")                // smart single quotes
+        .replace(/[\u201C\u201D]/g, '"')                // smart double quotes
+        .replace(/[\u2013\u2014]/g, '-')                // en/em dash
+        .replace(/[\u2022\u25CF]/g, '*')                // bullets
+        .replace(/[\u2026]/g, '...')                    // ellipsis
+        .replace(/[^\x00-\xFF]/g, '')                   // anything else outside WinAnsi's range - stripped, not crashed on
+        .trim();
+    }
     // Manual pagination - pdf-lib doesn't auto-flow text across pages,
     // so every write checks remaining space and adds a fresh page first
     // if needed.
@@ -55,14 +73,14 @@ export default async function handler(req, res) {
       const useFont = opts.bold ? bold : font;
       const color = opts.color || rgb(0.1, 0.1, 0.15);
       ensureSpace(size + 6);
-      page.drawText(String(str ?? '-'), { x: opts.x || MARGIN, y, size, font: useFont, color, maxWidth: opts.maxWidth || (PAGE_WIDTH - 2 * MARGIN) });
+      page.drawText(sanitizeText(str), { x: opts.x || MARGIN, y, size, font: useFont, color, maxWidth: opts.maxWidth || (PAGE_WIDTH - 2 * MARGIN) });
       y -= (opts.lineHeight || size + 6);
     }
     function sectionHeader(str) {
       ensureSpace(30);
       y -= 6;
       page.drawRectangle({ x: MARGIN, y: y - 4, width: PAGE_WIDTH - 2 * MARGIN, height: 20, color: rgb(0.92, 0.95, 1) });
-      page.drawText(str, { x: MARGIN + 6, y: y, size: 12, font: bold, color: rgb(0.09, 0.25, 0.65) });
+      page.drawText(sanitizeText(str), { x: MARGIN + 6, y: y, size: 12, font: bold, color: rgb(0.09, 0.25, 0.65) });
       y -= 26;
     }
     function tableRow(cells, widths, opts = {}) {
@@ -70,7 +88,7 @@ export default async function handler(req, res) {
       let x = MARGIN;
       const useFont = opts.bold ? bold : font;
       cells.forEach((c, i) => {
-        page.drawText(String(c ?? '-').slice(0, 40), { x, y, size: 9, font: useFont, color: rgb(0.15, 0.15, 0.2) });
+        page.drawText(sanitizeText(c).slice(0, 40), { x, y, size: 9, font: useFont, color: rgb(0.15, 0.15, 0.2) });
         x += widths[i];
       });
       y -= 15;
