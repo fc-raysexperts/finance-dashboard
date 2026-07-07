@@ -1,0 +1,18 @@
+name: Send Finance Dashboard Notifications
+
+# Verified schedule: 10am-6pm IST, Monday-Saturday only.
+# IST = UTC+5:30, so 10:00-18:00 IST = 04:30-12:30 UTC.
+# Cron day-of-week: 0=Sunday...6=Saturday, so 1-6 = Monday-Saturday.
+on:
+  schedule:
+    - cron: '30 4-12 * * 1-6'
+  workflow_dispatch:   # lets you trigger it manually from GitHub's Actions tab too
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for new pending items and notify
+        run: |
+          curl -s "https://finance-dashboard-liard-three.vercel.app/api/send-notifications?key=check123" -o response.json
+          cat response.json
