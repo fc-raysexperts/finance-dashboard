@@ -26,7 +26,6 @@
 const axios = require('axios');
 const { storeGet, storeSet } = require('../../lib/store');
 const { detectNewItems, buildMessageText } = require('../../lib/notifications');
-const { getAccessToken } = require('../../lib/zohoToken');
 const { getPendingPOs, getPendingBills } = require('../../lib/zoho');
 
 const KNOWN_IDS_KEY = 'notification_known_ids';
@@ -37,20 +36,6 @@ const KNOWN_IDS_KEY = 'notification_known_ids';
 // old company-wide snapshot.
 const KNOWN_IDS_VERSION = 2;
 
-async function zohoGET(path, params = {}) {
-  const token = await getAccessToken();
-  try {
-    const res = await axios.get(`https://www.zohoapis.in/books/v3${path}`, {
-      headers: { Authorization: `Zoho-oauthtoken ${token}` },
-      params: { organization_id: process.env.ZOHO_ORG_ID, ...params },
-    });
-    return res.data;
-  } catch (e) {
-    const detail = e.response?.data ? JSON.stringify(e.response.data) : e.message;
-    throw new Error(`Zoho ${path} failed: ${e.response?.status || ''} - ${detail}`);
-  }
-}
-
 // Real fix: reuses the dashboard's OWN pending-fetch functions instead of
 // a separately hand-rolled (and wrongly company-wide) version - this
 // guarantees the exact same scope Jatin already sees on his dashboard.
@@ -60,21 +45,23 @@ async function getCurrentPendingIds() {
     getPendingBills(false),
   ]);
 
-  // PMOs' 'Status.MyApprovals' filter is already scoped to whoever's
-  // authenticated (Jatin himself, via the token) - confirmed real and
-  // correctly Jatin-specific by Zoho's own design, so this one wasn't
-  // part of the scope bug.
+  // Real fix: PMO approval-matching genuinely requires checking
+  // approvers_list on each record's FULL detail (confirmed directly from
+  // pmos.js's own logic - isJatinCurrentApprover) - there's no reliable
+  // list-level filter for this, which is exactly why the simple
+  // filter_by attempt came back empty. Rather than duplicate that
+  // non-trivial logic separately here (risking it drift out of sync with
+  // the real dashboard), this calls the already-deployed, already-tested
+  // /api/pmos endpoint directly instead - guaranteeing byte-for-byte the
+  // same PMOs the dashboard itself shows Jatin.
   let pmos = [];
   let pmoError = null;
   try {
-    const pmoData = await zohoGET('/cm_payment_memos', { filter_by: 'Status.MyApprovals', per_page: 200 });
-    pmos = (pmoData.cm_payment_memos || []).map(p => p.module_record_id || p.id);
+    const siteUrl = process.env.SITE_URL || 'https://finance-dashboard-liard-three.vercel.app';
+    const pmoRes = await axios.get(`${siteUrl}/api/pmos`);
+    pmos = (pmoRes.data.data || []).map(p => p.id);
   } catch (e) {
-    // Real fix: this used to silently swallow the error entirely, giving
-    // zero visibility into why PMOs were coming back empty. Now surfaced
-    // directly in the response so the real cause can be seen instead of
-    // guessed at again.
-    pmoError = e.message;
+    pmoError = e.response?.data ? JSON.stringify(e.response.data) : e.message;
   }
 
   return {
