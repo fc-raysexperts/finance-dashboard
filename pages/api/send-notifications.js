@@ -2,26 +2,26 @@
 //
 // Called on a schedule (GitHub Actions, Mon-Sat 10am-6pm IST hourly) -
 // checks for genuinely new pending POs/Bills/PMOs since the last run and
-// notifies Jatin via WhatsApp + Email if anything new has come up.
+// notifies Jatin via WhatsApp if anything new has come up.
+//
+// Email notifications were deliberately dropped: Zoho itself already
+// sends Jatin an email whenever a new PO/Bill/PMO needs his approval, and
+// the org's Google Workspace policy blocks the App Password + personal-
+// Gmail workarounds needed to send email from this app. No nodemailer
+// dependency here at all - that's what was missing from package.json and
+// broke the build.
 //
 // WHATSAPP: no special "reply" API trick needed or used - WhatsApp
 // already keeps every message between the same two phone numbers in ONE
 // continuous chat by default, so sequential messages already satisfy
 // "one chat only" without needing an unconfirmed Twilio capability.
-//
-// EMAIL: genuinely needs real threading (Gmail doesn't auto-group
-// unrelated emails) - uses nodemailer's dedicated inReplyTo/references
-// properties. A fresh thread starts each new calendar day (IST); every
-// notification within the same day replies to that day's first email.
 
 const axios = require('axios');
-const nodemailer = require('nodemailer');
 const { storeGet, storeSet } = require('../../lib/store');
 const { detectNewItems, buildMessageText } = require('../../lib/notifications');
 const { getAccessToken } = require('../../lib/zohoToken');
 
 const KNOWN_IDS_KEY = 'notification_known_ids';
-const EMAIL_THREAD_KEY = 'notification_email_thread';
 
 async function zohoGET(path, params = {}) {
   const token = await getAccessToken();
@@ -68,48 +68,6 @@ async function sendWhatsApp(text) {
   });
 }
 
-async function sendEmail(text, subject) {
-  const user = process.env.GMAIL_USER;
-  const pass = process.env.GMAIL_APP_PASSWORD;
-  const to   = process.env.JATIN_EMAIL_TO;
-  if (!user || !pass || !to) {
-    console.log('Email not sent - missing Gmail env vars');
-    return null;
-  }
-
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user, pass },
-  });
-
-  // Real threading: a fresh thread starts each new day (IST); every
-  // notification within the same day replies to that day's first email,
-  // using nodemailer's dedicated inReplyTo/references properties.
-  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // YYYY-MM-DD
-  let thread = await storeGet(EMAIL_THREAD_KEY).catch(() => null);
-  const isNewDay = !thread || thread.day !== todayIST;
-
-  const mailOptions = {
-    from: user,
-    to,
-    subject: isNewDay ? `Finance Dashboard - Daily Update (${todayIST})` : thread.subject,
-    text,
-  };
-  if (!isNewDay && thread.messageId) {
-    mailOptions.inReplyTo = thread.messageId;
-    mailOptions.references = thread.messageId;
-  }
-
-  const info = await transporter.sendMail(mailOptions);
-
-  if (isNewDay) {
-    // This is the FIRST email of a new day - store its Message-ID as the
-    // thread root that every later notification today will reply to.
-    await storeSet(EMAIL_THREAD_KEY, { day: todayIST, messageId: info.messageId, subject: mailOptions.subject });
-  }
-  return info;
-}
-
 export default async function handler(req, res) {
   if (req.query.key !== 'check123') {
     return res.status(403).json({ error: 'Add ?key=check123 to the URL' });
@@ -130,10 +88,7 @@ export default async function handler(req, res) {
     }
 
     const messageText = buildMessageText(result);
-    await Promise.all([
-      sendWhatsApp(messageText).catch(e => console.log('WhatsApp send failed:', e.message)),
-      sendEmail(messageText).catch(e => console.log('Email send failed:', e.message)),
-    ]);
+    await sendWhatsApp(messageText).catch(e => console.log('WhatsApp send failed:', e.message));
 
     return res.status(200).json({ sent: true, message: messageText, ...result });
   } catch (e) {
