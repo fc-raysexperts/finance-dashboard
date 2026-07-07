@@ -1531,7 +1531,7 @@ function ItemDetailsTable({ items }) {
 }
 
 // ----- ATTACHMENTS -----
-function Attachments({ docs, docType, docId, onPreview }) {
+function Attachments({ docs, onPreview }) {
   if (!docs || !docs.length) return <div style={{color:'#94a3b8',fontSize:12,marginBottom:16}}>{'\u{1F4CE}'} No attachments</div>;
   return (
     <div style={{marginBottom:16}}>
@@ -1539,13 +1539,16 @@ function Attachments({ docs, docType, docId, onPreview }) {
       <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
         {docs.map(function(d,i){
           const name = d.file_name || d.fileName || ('Document ' + (i+1));
-          // Real fix: docs never actually had a usable download URL (Zoho's
-          // real attachment field only has document_id, file_name, etc,
-          // confirmed against the real API docs) - clicking now opens a
-          // real preview via the backend proxy instead of a dead link.
+          const documentId = d.document_id || d.documentId;
+          // Real fix: each attachment now uses its OWN document_id (the
+          // real per-file identifier) instead of a shared parent ID -
+          // previously every button pointed at the same PO/Bill-level
+          // endpoint regardless of which specific file was clicked,
+          // which is exactly why every attachment showed the same PDF.
           return (
-            <button key={i} onClick={function(){ onPreview && onPreview({name, docType, docId}); }}
-              style={{display:'flex',alignItems:'center',gap:6,background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'5px 10px',fontSize:12,fontWeight:500,cursor:'pointer'}}>
+            <button key={i} onClick={function(){ documentId && onPreview && onPreview({name, documentId}); }}
+              disabled={!documentId}
+              style={{display:'flex',alignItems:'center',gap:6,background:documentId?'#eff6ff':'#f8fafc',color:documentId?'#1d4ed8':'#94a3b8',border:'1px solid ' + (documentId?'#bfdbfe':'#e2e8f0'),borderRadius:6,padding:'5px 10px',fontSize:12,fontWeight:500,cursor:documentId?'pointer':'default'}}>
               {'\u{1F4CE} ' + name}
             </button>
           );
@@ -1779,14 +1782,14 @@ function DetailModal({ item, type, onClose }) {
         item.attachmentId
           ? <div style={{marginBottom:16}}>
               <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>Attachments (1)</h3>
-              <button onClick={function(){ setAttachmentPreview({name: item.attachmentName || 'PI/Bill attachment', docType:'pmo', docId:item.id}); }}
+              <button onClick={function(){ setAttachmentPreview({name: item.attachmentName || 'PI/Bill attachment', documentId: item.attachmentId}); }}
                 style={{display:'inline-flex',alignItems:'center',gap:6,background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'5px 10px',fontSize:13,fontWeight:500,cursor:'pointer'}}>
                 {'\u{1F4CE} ' + (item.attachmentName || 'PI/Bill — ref ' + item.attachmentId)}
               </button>
             </div>
           : <Attachments docs={null}/>
       ) : (
-        <Attachments docs={item.attachments || item.docs || item.documents} docType={isBill?'bill':'po'} docId={item.id} onPreview={setAttachmentPreview}/>
+        <Attachments docs={item.attachments || item.docs || item.documents} onPreview={setAttachmentPreview}/>
       )}
     </Modal>
     {fullTextView && (
@@ -1797,19 +1800,19 @@ function DetailModal({ item, type, onClose }) {
     {attachmentPreview && (
       <Modal onClose={function(){setAttachmentPreview(null);}} width={800} title={attachmentPreview.name} zIndex={1100}>
         <iframe
-          src={`/api/attachment-proxy?type=${attachmentPreview.docType}&id=${attachmentPreview.docId}`}
+          src={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}`}
           style={{width:'100%',height:'70vh',border:'1px solid #e2e8f0',borderRadius:8}}
           title={attachmentPreview.name}
         />
         <div style={{marginTop:8,textAlign:'right'}}>
-          <a href={`/api/attachment-proxy?type=${attachmentPreview.docType}&id=${attachmentPreview.docId}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
+          <a href={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
             Open in new tab / download
           </a>
         </div>
       </Modal>
     )}
     {itemDetailsView && (
-      <Modal onClose={function(){setItemDetailsView(null);}} width={900} title="Item Details" zIndex={1100}>
+      <Modal onClose={function(){setItemDetailsView(null);}} width={1100} title="Item Details" zIndex={1100}>
         <ItemDetailsTable items={itemDetailsView}/>
       </Modal>
     )}

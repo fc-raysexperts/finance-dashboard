@@ -1,43 +1,36 @@
 // pages/api/attachment-proxy.js
 //
-// Streams a PO/Bill/PMO attachment from Zoho through this server, since a
-// direct link to Zoho's own URL would require an auth token the browser
-// doesn't have. Confirmed real endpoints (Zoho Books API documentation):
-//   GET /purchaseorders/{purchaseorder_id}/attachment
-//   GET /bills/{bill_id}/attachment
-// PMO's real endpoint confirmed earlier from a captured network request:
-//   GET /cm_payment_memos/{id}/attachment
+// Streams a specific attachment's real binary content through this
+// server. Real bug fixed: GET /purchaseorders/{id}/attachment (and the
+// Bill/PMO equivalents) do NOT return file binary at all - they return
+// metadata about the attached documents (confirmed directly from a real
+// captured response: {code, message, documents:[{file_name, document_id,
+// ...}]}). Calling that same endpoint regardless of which specific file
+// was clicked is exactly why every attachment button showed the same
+// file. The real endpoint to download ONE SPECIFIC file's actual bytes
+// is GET /documents/{document_id} - keyed by that individual document's
+// own unique ID, not the parent record's ID.
 
 import { getAccessToken } from '../../lib/zohoToken';
 const axios = require('axios');
 
-const ENDPOINT_MAP = {
-  po:   (id) => `/purchaseorders/${id}/attachment`,
-  bill: (id) => `/bills/${id}/attachment`,
-  pmo:  (id) => `/cm_payment_memos/${id}/attachment`,
-};
-
 export default async function handler(req, res) {
-  const { type, id } = req.query;
-  if (!type || !id || !ENDPOINT_MAP[type]) {
-    return res.status(400).send('Missing or invalid type/id');
+  const { documentId } = req.query;
+  if (!documentId) {
+    return res.status(400).send('Missing documentId');
   }
 
   try {
     const token = await getAccessToken();
-    const path = ENDPOINT_MAP[type](id);
-    const response = await axios.get(`https://www.zohoapis.in/books/v3${path}`, {
+    const response = await axios.get(`https://www.zohoapis.in/books/v3/documents/${documentId}`, {
       headers: { Authorization: `Zoho-oauthtoken ${token}` },
       params: { organization_id: process.env.ZOHO_ORG_ID },
-      responseType: 'arraybuffer', // binary content, not JSON
+      responseType: 'arraybuffer',
     });
 
-    // Zoho reports the real content type itself - trust it, falling back
-    // to PDF only if it's genuinely missing (most attachments are PDFs
-    // in this org, confirmed from earlier real examples).
     const contentType = response.headers['content-type'] || 'application/pdf';
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'private, max-age=300'); // small cache - same attachment rarely changes within a session
+    res.setHeader('Cache-Control', 'private, max-age=300');
     res.status(200).send(Buffer.from(response.data));
   } catch (e) {
     res.status(500).send('Could not load attachment: ' + (e.response?.status || e.message));

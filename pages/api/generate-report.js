@@ -12,6 +12,12 @@
 
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
+export const config = {
+  api: {
+    responseLimit: false,
+  },
+};
+
 const PAGE_WIDTH = 595, PAGE_HEIGHT = 842; // A4
 const MARGIN = 40;
 
@@ -139,10 +145,18 @@ export default async function handler(req, res) {
     }
 
     const pdfBytes = await pdfDoc.save();
+    const buffer = Buffer.from(pdfBytes);
     const fileName = `Review_Report_${title.replace(/[\/\s]+/g, '_')}.pdf`;
+    // Real fix: res.send() in Next.js API routes isn't always reliable for
+    // raw binary payloads without an explicit Content-Length - this is the
+    // standard, well-documented fix for a downloaded file that looks like
+    // it worked but won't actually open ("failed to load", "not a
+    // supported file type"). res.end() with an explicit length avoids any
+    // implicit re-encoding of the buffer.
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    res.status(200).send(Buffer.from(pdfBytes));
+    res.setHeader('Content-Length', buffer.length);
+    res.status(200).end(buffer);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
