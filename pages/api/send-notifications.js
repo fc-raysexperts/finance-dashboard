@@ -1,27 +1,41 @@
 // pages/api/send-notifications.js
 //
 // Called on a schedule (GitHub Actions, Mon-Sat 10am-6pm IST hourly) -
-// checks for genuinely new pending POs/Bills/PMOs since the last run and
-// notifies Jatin via WhatsApp if anything new has come up.
+// checks for genuinely new items PENDING JATIN'S OWN APPROVAL specifically
+// (not company-wide) since the last run, and notifies him via WhatsApp.
+//
+// Two real bugs fixed this round:
+// 1. COLD START: the very first time this ever ran, there was no prior
+//    baseline to compare against, so EVERY currently-pending item got
+//    counted as "new" (271 items - a company-wide total, not a real
+//    change). Fixed: the first run now silently records the baseline and
+//    sends nothing, since there's no genuine "new" to report yet.
+// 2. WRONG SCOPE: this was querying ALL company-wide pending POs/Bills,
+//    not just what's actually pending Jatin's own approval - explaining
+//    why the count (271) was wildly higher than what he actually sees on
+//    his dashboard ("dozens"). Fixed: now reuses getPendingPOs/
+//    getPendingBills directly from lib/zoho.js - the EXACT same functions
+//    the dashboard itself uses, guaranteeing identical scope, not a
+//    separately hand-rolled (and wrong) version of the same filtering.
 //
 // Email notifications were deliberately dropped: Zoho itself already
 // sends Jatin an email whenever a new PO/Bill/PMO needs his approval, and
-// the org's Google Workspace policy blocks the App Password + personal-
-// Gmail workarounds needed to send email from this app. No nodemailer
-// dependency here at all - that's what was missing from package.json and
-// broke the build.
-//
-// WHATSAPP: no special "reply" API trick needed or used - WhatsApp
-// already keeps every message between the same two phone numbers in ONE
-// continuous chat by default, so sequential messages already satisfy
-// "one chat only" without needing an unconfirmed Twilio capability.
+// the org's Google Workspace policy blocks the workarounds needed to
+// send email from this app.
 
 const axios = require('axios');
 const { storeGet, storeSet } = require('../../lib/store');
 const { detectNewItems, buildMessageText } = require('../../lib/notifications');
 const { getAccessToken } = require('../../lib/zohoToken');
+const { getPendingPOs, getPendingBills } = require('../../lib/zoho');
 
 const KNOWN_IDS_KEY = 'notification_known_ids';
+// Bumped because the previous version's baseline was scoped WRONG
+// (company-wide instead of Jatin-specific) - this forces that corrupted
+// baseline to be discarded and a genuine, correctly-scoped cold start to
+// happen once, rather than comparing fresh Jatin-specific data against an
+// old company-wide snapshot.
+const KNOWN_IDS_VERSION = 2;
 
 async function zohoGET(path, params = {}) {
   const token = await getAccessToken();
@@ -32,40 +46,42 @@ async function zohoGET(path, params = {}) {
     });
     return res.data;
   } catch (e) {
-    // Real fix: surface Zoho's actual error message, not just the bare
-    // status code - this is what let us finally pin down the wrong
-    // filter parameter below instead of guessing again.
     const detail = e.response?.data ? JSON.stringify(e.response.data) : e.message;
     throw new Error(`Zoho ${path} failed: ${e.response?.status || ''} - ${detail}`);
   }
 }
 
-// Fetches ALL company-wide pending POs/Bills (not just Jatin's own),
-// since we specifically want to catch anything new regardless of who
-// it's currently awaiting approval from, matching "any new PBP that's
-// come up" as stated. PMOs use the existing custom-module pending list.
+// Real fix: reuses the dashboard's OWN pending-fetch functions instead of
+// a separately hand-rolled (and wrongly company-wide) version - this
+// guarantees the exact same scope Jatin already sees on his dashboard.
 async function getCurrentPendingIds() {
-  const [poData, billData] = await Promise.all([
-    zohoGET('/purchaseorders', { status: 'pending_approval', per_page: 200 }),
-    zohoGET('/bills', { status: 'pending_approval', per_page: 200 }),
+  const [pos, bills] = await Promise.all([
+    getPendingPOs(false),
+    getPendingBills(false),
   ]);
-  const pos   = (poData.purchaseorders || []).map(p => p.purchaseorder_id);
-  const bills = (billData.bills || []).map(b => b.bill_id);
 
+  // PMOs' 'Status.MyApprovals' filter is already scoped to whoever's
+  // authenticated (Jatin himself, via the token) - confirmed real and
+  // correctly Jatin-specific by Zoho's own design, so this one wasn't
+  // part of the scope bug.
   let pmos = [];
   try {
     const pmoData = await zohoGET('/cm_payment_memos', { filter_by: 'Status.MyApprovals', per_page: 200 });
     pmos = (pmoData.cm_payment_memos || []).map(p => p.module_record_id || p.id);
   } catch { /* PMO module path may differ - non-fatal, POs/Bills still work */ }
 
-  return { pos, bills, pmos };
+  return {
+    pos: (pos || []).map(p => p.purchaseorder_id),
+    bills: (bills || []).map(b => b.bill_id),
+    pmos,
+  };
 }
 
 async function sendWhatsApp(text) {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken  = process.env.TWILIO_AUTH_TOKEN;
-  const from       = process.env.TWILIO_WHATSAPP_FROM; // e.g. 'whatsapp:+14155238886'
-  const to         = process.env.JATIN_WHATSAPP_TO;    // e.g. 'whatsapp:+91XXXXXXXXXX'
+  const from       = process.env.TWILIO_WHATSAPP_FROM;
+  const to         = process.env.JATIN_WHATSAPP_TO;
   if (!accountSid || !authToken || !from || !to) {
     console.log('WhatsApp not sent - missing Twilio env vars');
     return;
@@ -83,13 +99,25 @@ export default async function handler(req, res) {
 
   try {
     const current = await getCurrentPendingIds();
-    const known = await storeGet(KNOWN_IDS_KEY).catch(() => null) || { pos: [], bills: [], pmos: [] };
-    const result = detectNewItems(current, known);
+    const stored = await storeGet(KNOWN_IDS_KEY).catch(() => null);
+    const known = (stored && stored.version === KNOWN_IDS_VERSION) ? stored.data : null;
 
-    // Always persist the current full snapshot, whether or not anything
-    // was new, so next hour's comparison is always against the right
-    // baseline.
-    await storeSet(KNOWN_IDS_KEY, result.updatedKnown);
+    // Real fix for the cold-start bug: if this is genuinely the FIRST
+    // time this has ever run (no baseline exists at all), OR the stored
+    // baseline is from the old, wrongly-scoped version, there is no
+    // valid "new" to report - everything currently pending was simply
+    // already there before we started watching correctly. Silently
+    // establish the baseline and send nothing this one time only.
+    if (known === null) {
+      await storeSet(KNOWN_IDS_KEY, { version: KNOWN_IDS_VERSION, data: current });
+      return res.status(200).json({
+        sent: false, reason: 'Baseline established (fresh or re-scoped) - no notification sent',
+        baselineCounts: { pos: current.pos.length, bills: current.bills.length, pmos: current.pmos.length },
+      });
+    }
+
+    const result = detectNewItems(current, known);
+    await storeSet(KNOWN_IDS_KEY, { version: KNOWN_IDS_VERSION, data: result.updatedKnown });
 
     if (result.totalNew === 0) {
       return res.status(200).json({ sent: false, reason: 'No new items since last check', ...result });
