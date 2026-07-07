@@ -1358,7 +1358,7 @@ function resolveItemName(li) {
   return words.length <= 5 ? desc : words.slice(0, 5).join(' ') + '...';
 }
 
-function ItemsTable({ items, title, subTotal, taxes, total, discount, discountFormatted, adjustment, adjustmentDescription }) {
+function ItemsTable({ items, title, subTotal, taxes, total, discount, discountFormatted, adjustment, adjustmentDescription, onItemDetails }) {
   if (!items || !items.length) return null;
   const computedSubTotal = items.reduce((s, li) => s + (Number(li.item_total) || 0), 0);
   const displaySubTotal  = subTotal != null ? subTotal : computedSubTotal;
@@ -1411,7 +1411,15 @@ function ItemsTable({ items, title, subTotal, taxes, total, discount, discountFo
 
   return (
     <div style={{marginBottom:20}}>
-      <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title||'Line Items'}</h3>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+        <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{title||'Line Items'}</h3>
+        {onItemDetails && (
+          <button onClick={function(){ onItemDetails(items); }}
+            style={{background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'5px 12px',fontSize:12,fontWeight:600,cursor:'pointer'}}>
+            Item Details
+          </button>
+        )}
+      </div>
       <div style={{overflowX:'auto',border:'1px solid #e2e8f0',borderRadius:8}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr style={{background:'#eff6ff'}}>
@@ -1477,8 +1485,53 @@ function ItemsTable({ items, title, subTotal, taxes, total, discount, discountFo
   );
 }
 
+// ----- ITEM DETAILS TABLE (Phase 4 - shown in its own popup, opened via
+// the 'Item Details' button on the Line Items table) -----
+function ItemDetailsTable({ items }) {
+  if (!items || !items.length) return null;
+  return (
+    <div style={{overflowX:'auto'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr style={{background:'#eff6ff'}}>
+          {['#','Item Name','Specification','Project','Location','Account','Qty','Unit','Rate','Amount','Tax'].map(function(h){
+            return <th key={h} style={{padding:'7px 10px',textAlign:'left',color:'#1e40af',fontWeight:700,fontSize:12,borderBottom:'1px solid #dbeafe',whiteSpace:'nowrap'}}>{h}</th>;
+          })}
+        </tr></thead>
+        <tbody>
+          {items.map(function(li,i){
+            const displayName = resolveItemName(li);
+            return (
+              <Fragment key={i}>
+                <tr style={{borderBottom:'none'}}>
+                  <td style={{padding:'6px 10px',color:'#94a3b8',fontSize:11,verticalAlign:'top'}}>{i+1}</td>
+                  <td style={{padding:'6px 10px',color:'#0f172a',fontWeight:500,maxWidth:160,whiteSpace:'normal',wordBreak:'break-word',verticalAlign:'top'}}>{displayName||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'6px 10px',color:'#7c3aed',fontSize:12,verticalAlign:'top'}}>{li.sku||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'6px 10px',color:'#2563eb',fontSize:12,verticalAlign:'top'}}>{li.project_name||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'6px 10px',color:'#64748b',fontSize:12,verticalAlign:'top'}}>{li.location_name||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'6px 10px',color:'#64748b',fontSize:12,verticalAlign:'top'}}>{li.account_name||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'6px 10px',color:'#0f172a',verticalAlign:'top'}}>{fmtN(li.quantity)}</td>
+                  <td style={{padding:'6px 10px',color:'#64748b',verticalAlign:'top'}}>{li.unit||String.fromCharCode(8212)}</td>
+                  <td style={{padding:'6px 10px',color:'#0f172a',verticalAlign:'top'}}>{fmt(li.rate)}</td>
+                  <td style={{padding:'6px 10px',color:'#0f172a',fontWeight:600,verticalAlign:'top'}}>{fmt(li.item_total)}</td>
+                  <td style={{padding:'6px 10px',color:'#64748b',fontSize:12,verticalAlign:'top'}}>{li.tax_name||String.fromCharCode(8212)}</td>
+                </tr>
+                {li.description && (
+                  <tr style={{borderBottom:'1px solid #f1f5f9'}}>
+                    <td></td>
+                    <td colSpan={10} style={{padding:'0 10px 8px',color:'#64748b',fontSize:12,fontStyle:'italic',wordBreak:'break-word'}}>{li.description}</td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ----- ATTACHMENTS -----
-function Attachments({ docs }) {
+function Attachments({ docs, docType, docId, onPreview }) {
   if (!docs || !docs.length) return <div style={{color:'#94a3b8',fontSize:12,marginBottom:16}}>{'\u{1F4CE}'} No attachments</div>;
   return (
     <div style={{marginBottom:16}}>
@@ -1486,11 +1539,15 @@ function Attachments({ docs }) {
       <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
         {docs.map(function(d,i){
           const name = d.file_name || d.fileName || ('Document ' + (i+1));
-          const url = d.download_url || d.attachment_url || null;
-          return url ? (
-            <a key={i} href={url} target="_blank" rel="noreferrer" style={{display:'flex',alignItems:'center',gap:6,background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'5px 10px',fontSize:12,fontWeight:500,textDecoration:'none'}}>{'\u{1F4CE} ' + name}</a>
-          ) : (
-            <span key={i} style={{display:'flex',alignItems:'center',gap:6,background:'#f8fafc',color:'#64748b',border:'1px solid #e2e8f0',borderRadius:6,padding:'5px 10px',fontSize:12}}>{'\u{1F4CE} ' + name}</span>
+          // Real fix: docs never actually had a usable download URL (Zoho's
+          // real attachment field only has document_id, file_name, etc,
+          // confirmed against the real API docs) - clicking now opens a
+          // real preview via the backend proxy instead of a dead link.
+          return (
+            <button key={i} onClick={function(){ onPreview && onPreview({name, docType, docId}); }}
+              style={{display:'flex',alignItems:'center',gap:6,background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'5px 10px',fontSize:12,fontWeight:500,cursor:'pointer'}}>
+              {'\u{1F4CE} ' + name}
+            </button>
           );
         })}
       </div>
@@ -1502,6 +1559,8 @@ function Attachments({ docs }) {
 function DetailModal({ item, type, onClose }) {
   const isBill = type === 'bill', isPMO = type === 'pmo';
   const [fullTextView, setFullTextView] = useState(null); // {label, text} - only used for genuinely long Notes/Terms that would take up too much of the popup inline
+  const [attachmentPreview, setAttachmentPreview] = useState(null); // {name, docType, docId} - opens a nested modal with the real PDF embedded
+  const [itemDetailsView, setItemDetailsView] = useState(null); // array of line items - opens a nested modal showing every field for each
 
   // PMO gets 4 sections matching ZB's own real layout exactly, plus a 5th
   // section clearly separated and labeled as this dashboard's own added
@@ -1622,7 +1681,23 @@ function DetailModal({ item, type, onClose }) {
     <>
     <Modal onClose={onClose} width={980}
       title={isPMO ? ('PMO ' + item.pmoNumber) : isBill ? ('Bill ' + item.billNumber) : ('PO ' + item.poNumber)}
-      subtitle={item.vendor}>
+      subtitle={item.vendor}
+      headerExtra={
+        <button onClick={async function(){
+          const res = await fetch('/api/generate-report', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ item, type: isPMO?'pmo':isBill?'bill':'po' }),
+          });
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = `Review_Report_${item.poNumber||item.billNumber||item.pmoNumber}.pdf`;
+          document.body.appendChild(a); a.click(); a.remove();
+          URL.revokeObjectURL(url);
+        }} style={{background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'6px 12px',fontSize:12,fontWeight:600,cursor:'pointer'}}>
+          {'\u{1F4C4} Download Review Report'}
+        </button>
+      }>
       {projectNames.length > 0 && (
         <div style={{background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:8,padding:'10px 14px',marginBottom:14}}>
           <div style={{fontSize:10,color:'#0369a1',fontWeight:700,letterSpacing:'0.08em',marginBottom:6}}>PROJECT(S) IN ZOHO</div>
@@ -1671,7 +1746,8 @@ function DetailModal({ item, type, onClose }) {
         </>
       )}
       <ItemsTable items={item.lineItems || item.line_items} title="Line Items" subTotal={item.subTotal} taxes={item.taxes} total={item.total}
-        discount={item.discount} discountFormatted={item.discountFormatted} adjustment={item.adjustment} adjustmentDescription={item.adjustmentDescription}/>
+        discount={item.discount} discountFormatted={item.discountFormatted} adjustment={item.adjustment} adjustmentDescription={item.adjustmentDescription}
+        onItemDetails={!isPMO ? setItemDetailsView : undefined}/>
       {isBill ? (
         <>
           <div style={{background:'#f8fafc',borderRadius:10,padding:'14px 18px',marginBottom:16}}>
@@ -1703,18 +1779,38 @@ function DetailModal({ item, type, onClose }) {
         item.attachmentId
           ? <div style={{marginBottom:16}}>
               <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>Attachments (1)</h3>
-              <span style={{display:'inline-flex',alignItems:'center',gap:6,background:'#f8fafc',color:'#64748b',border:'1px solid #e2e8f0',borderRadius:6,padding:'5px 10px',fontSize:13}}>
-                {'\u{1F4CE} ' + (item.attachmentName || 'PI/Bill — ref ' + item.attachmentId) + ' (preview coming in a later update)'}
-              </span>
+              <button onClick={function(){ setAttachmentPreview({name: item.attachmentName || 'PI/Bill attachment', docType:'pmo', docId:item.id}); }}
+                style={{display:'inline-flex',alignItems:'center',gap:6,background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'5px 10px',fontSize:13,fontWeight:500,cursor:'pointer'}}>
+                {'\u{1F4CE} ' + (item.attachmentName || 'PI/Bill — ref ' + item.attachmentId)}
+              </button>
             </div>
           : <Attachments docs={null}/>
       ) : (
-        <Attachments docs={item.attachments || item.docs || item.documents}/>
+        <Attachments docs={item.attachments || item.docs || item.documents} docType={isBill?'bill':'po'} docId={item.id} onPreview={setAttachmentPreview}/>
       )}
     </Modal>
     {fullTextView && (
       <Modal onClose={function(){setFullTextView(null);}} width={640} title={fullTextView.label} zIndex={1100}>
         <div style={{fontSize:14,color:'#0f172a',lineHeight:1.6,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{fullTextView.text}</div>
+      </Modal>
+    )}
+    {attachmentPreview && (
+      <Modal onClose={function(){setAttachmentPreview(null);}} width={800} title={attachmentPreview.name} zIndex={1100}>
+        <iframe
+          src={`/api/attachment-proxy?type=${attachmentPreview.docType}&id=${attachmentPreview.docId}`}
+          style={{width:'100%',height:'70vh',border:'1px solid #e2e8f0',borderRadius:8}}
+          title={attachmentPreview.name}
+        />
+        <div style={{marginTop:8,textAlign:'right'}}>
+          <a href={`/api/attachment-proxy?type=${attachmentPreview.docType}&id=${attachmentPreview.docId}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
+            Open in new tab / download
+          </a>
+        </div>
+      </Modal>
+    )}
+    {itemDetailsView && (
+      <Modal onClose={function(){setItemDetailsView(null);}} width={900} title="Item Details" zIndex={1100}>
+        <ItemDetailsTable items={itemDetailsView}/>
       </Modal>
     )}
     </>
