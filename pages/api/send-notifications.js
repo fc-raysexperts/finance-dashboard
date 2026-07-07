@@ -65,15 +65,22 @@ async function getCurrentPendingIds() {
   // correctly Jatin-specific by Zoho's own design, so this one wasn't
   // part of the scope bug.
   let pmos = [];
+  let pmoError = null;
   try {
     const pmoData = await zohoGET('/cm_payment_memos', { filter_by: 'Status.MyApprovals', per_page: 200 });
     pmos = (pmoData.cm_payment_memos || []).map(p => p.module_record_id || p.id);
-  } catch { /* PMO module path may differ - non-fatal, POs/Bills still work */ }
+  } catch (e) {
+    // Real fix: this used to silently swallow the error entirely, giving
+    // zero visibility into why PMOs were coming back empty. Now surfaced
+    // directly in the response so the real cause can be seen instead of
+    // guessed at again.
+    pmoError = e.message;
+  }
 
   return {
     pos: (pos || []).map(p => p.purchaseorder_id),
     bills: (bills || []).map(b => b.bill_id),
-    pmos,
+    pmos, pmoError,
   };
 }
 
@@ -98,7 +105,8 @@ export default async function handler(req, res) {
   }
 
   try {
-    const current = await getCurrentPendingIds();
+    const rawCurrent = await getCurrentPendingIds();
+    const { pmoError, ...current } = rawCurrent; // keep the diagnostic separate from what actually gets persisted
     const stored = await storeGet(KNOWN_IDS_KEY).catch(() => null);
     const known = (stored && stored.version === KNOWN_IDS_VERSION) ? stored.data : null;
 
@@ -113,6 +121,7 @@ export default async function handler(req, res) {
       return res.status(200).json({
         sent: false, reason: 'Baseline established (fresh or re-scoped) - no notification sent',
         baselineCounts: { pos: current.pos.length, bills: current.bills.length, pmos: current.pmos.length },
+        pmoError: pmoError || undefined,
       });
     }
 
@@ -120,7 +129,7 @@ export default async function handler(req, res) {
     await storeSet(KNOWN_IDS_KEY, { version: KNOWN_IDS_VERSION, data: result.updatedKnown });
 
     if (result.totalNew === 0) {
-      return res.status(200).json({ sent: false, reason: 'No new items since last check', ...result });
+      return res.status(200).json({ sent: false, reason: 'No new items since last check', ...result, pmoError: pmoError || undefined });
     }
 
     const messageText = buildMessageText(result);
