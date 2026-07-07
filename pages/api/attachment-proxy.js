@@ -33,6 +33,7 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'private, max-age=300');
     res.status(200).send(Buffer.from(response.data));
   } catch (e) {
-    res.status(500).send('Could not load attachment: ' + (e.response?.status || e.message));
+    const zohoErrorBody = e.response?.data ? Buffer.from(e.response.data).toString('utf-8').slice(0, 500) : null;
+    res.status(500).send('Could not load attachment: ' + (e.response?.status || e.message) + (zohoErrorBody ? ' | Zoho said: ' + zohoErrorBody : ''));
   }
 }

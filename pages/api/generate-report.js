@@ -15,6 +15,7 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 export const config = {
   api: {
     responseLimit: false,
+    bodyParser: { sizeLimit: '10mb' }, // real fix: a full PO/Bill's data (all line items + every compliance/alignment/reference-rate check) can exceed Next.js's default 1MB limit, silently failing the request
   },
 };
 

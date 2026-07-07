@@ -1691,6 +1691,11 @@ function DetailModal({ item, type, onClose }) {
             method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({ item, type: isPMO?'pmo':isBill?'bill':'po' }),
           });
+          if (!res.ok) {
+            const errText = await res.text().catch(function(){ return 'Unknown error'; });
+            alert('Could not generate report: ' + res.status + ' - ' + errText.slice(0, 200));
+            return;
+          }
           const blob = await res.blob();
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
