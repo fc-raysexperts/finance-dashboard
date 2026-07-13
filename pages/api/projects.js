@@ -88,9 +88,12 @@ export default async function handler(req, res) {
       const parkProjects = sortByEndDateDesc([...byIdList, ...byParkField]);
 
       return {
-        name:       parkName,
-        district:   info.district || '',
-        state:      info.state    || 'Rajasthan',
+        name:             parkName,
+        district:         info.district || '',
+        state:            info.state    || 'Rajasthan',
+        dcCapacity:       info.dcCapacity       ?? null, // max DC capacity (MWp), user-editable planning figure
+        land:             info.land             ?? null, // land in Acres, user-editable planning figure
+        revenuePotential: info.revenuePotential ?? null, // targeted revenue (₹ Cr), user-editable planning figure
         projects:   parkProjects,
         totalDC:    parkProjects.reduce((s, p) => s + (p.dc || 0), 0),
         totalBESS:  parkProjects.reduce((s, p) => s + (p.bess || 0), 0),

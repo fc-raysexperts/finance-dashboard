@@ -610,6 +610,9 @@ function AddParkModal({ onClose, onSaved }) {
   const [name, setName]       = useState('');
   const [district, setDistrict] = useState('');
   const [state, setState]     = useState('Rajasthan');
+  const [dcCapacity, setDCCapacity] = useState('');
+  const [land, setLand]             = useState('');
+  const [revenuePotential, setRevenuePotential] = useState('');
   const [saving, setSaving]   = useState(false);
   const [err, setErr]         = useState('');
 
@@ -617,7 +620,7 @@ function AddParkModal({ onClose, onSaved }) {
     if (!name) { setErr('Park name is required'); return; }
     setSaving(true); setErr('');
     try {
-      const r = await fetch('/api/store/parks', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, district, state }) });
+      const r = await fetch('/api/store/parks', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, district, state, dcCapacity, land, revenuePotential }) });
       const d = await r.json();
       if (d.success) { onSaved(); onClose(); } else { setErr(d.error || 'Failed to save'); }
     } catch (e) { setErr(e.message); }
@@ -630,6 +633,9 @@ function AddParkModal({ onClose, onSaved }) {
         <Field label="Park Name" value={name} onChange={setName} placeholder="e.g. Khinwara Park"/>
         <Field label="District" value={district} onChange={setDistrict} placeholder="e.g. Phalodi"/>
         <Field label="State" value={state} onChange={setState} placeholder="e.g. Rajasthan"/>
+        <Field label="DC Capacity (MWp, max)" value={dcCapacity} onChange={setDCCapacity} placeholder="e.g. 105"/>
+        <Field label="Land (Acres)" value={land} onChange={setLand} placeholder="e.g. 315"/>
+        <Field label="Revenue Potential (₹ Cr)" value={revenuePotential} onChange={setRevenuePotential} placeholder="e.g. 315"/>
       </div>
       {err && <div style={{background:'#fff1f2',color:'#dc2626',border:'1px solid #fecaca',borderRadius:8,padding:'8px 12px',fontSize:12,marginBottom:14}}>{err}</div>}
       <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:8,padding:'10px 14px',fontSize:12,color:'#1d4ed8',marginBottom:16}}>
@@ -648,6 +654,9 @@ function EditParkModal({ park, onClose, onSaved }) {
   const [name, setName]         = useState(park.name || '');
   const [district, setDistrict] = useState(park.district || '');
   const [state, setState]       = useState(park.state || 'Rajasthan');
+  const [dcCapacity, setDCCapacity] = useState(park.dcCapacity != null ? String(park.dcCapacity) : '');
+  const [land, setLand]             = useState(park.land != null ? String(park.land) : '');
+  const [revenuePotential, setRevenuePotential] = useState(park.revenuePotential != null ? String(park.revenuePotential) : '');
   const [saving, setSaving]     = useState(false);
   const [err, setErr]           = useState('');
 
@@ -657,7 +666,7 @@ function EditParkModal({ park, onClose, onSaved }) {
     try {
       const r = await fetch('/api/store/parks', {
         method:'PUT', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ originalName: park.name, name, district, state })
+        body: JSON.stringify({ originalName: park.name, name, district, state, dcCapacity, land, revenuePotential })
       });
       const d = await r.json();
       if (d.success) { onSaved(); onClose(); } else { setErr(d.error || 'Failed to save'); }
@@ -671,6 +680,9 @@ function EditParkModal({ park, onClose, onSaved }) {
         <Field label="Park Name" value={name} onChange={setName} placeholder="e.g. Khinwara Park"/>
         <Field label="District" value={district} onChange={setDistrict} placeholder="e.g. Phalodi"/>
         <Field label="State" value={state} onChange={setState} placeholder="e.g. Rajasthan"/>
+        <Field label="DC Capacity (MWp, max)" value={dcCapacity} onChange={setDCCapacity} placeholder="e.g. 105"/>
+        <Field label="Land (Acres)" value={land} onChange={setLand} placeholder="e.g. 315"/>
+        <Field label="Revenue Potential (₹ Cr)" value={revenuePotential} onChange={setRevenuePotential} placeholder="e.g. 315"/>
       </div>
       {name !== park.name && (
         <div style={{background:'#fef9c3',border:'1px solid #fde68a',borderRadius:8,padding:'10px 14px',fontSize:12,color:'#92400e',marginBottom:16}}>
@@ -1296,6 +1308,21 @@ function ParkModal({ park, onClose, onProjectClick, onParkUpdated }) {
           {'\u{1F58A}\uFE0F EDIT'}
         </button>
       }>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:10}}>
+        {[
+          ['DC Capacity', park.dcCapacity!=null ? (Number(park.dcCapacity).toFixed(1) + ' MWp') : String.fromCharCode(8212)],
+          ['Land', park.land!=null ? (park.land + ' Acres') : String.fromCharCode(8212)],
+          ['Revenue Potential', park.revenuePotential!=null ? ('\u20B9' + park.revenuePotential + ' Cr') : String.fromCharCode(8212)],
+        ].map(function(pair){
+          const k = pair[0], v = pair[1];
+          return (
+            <div key={k} style={{background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:8,padding:'10px 12px'}}>
+              <div style={{fontSize:10,color:'#94a3b8',fontWeight:700,marginBottom:3}}>{k.toUpperCase()}</div>
+              <div style={{fontSize:15,fontWeight:700,color:'#0f172a'}}>{v}</div>
+            </div>
+          );
+        })}
+      </div>
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:16}}>
         {[
           ['Total DC', park.totalDC.toFixed(2) + ' MWp'],

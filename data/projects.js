@@ -34,13 +34,13 @@ const PROJECTS = [
 // the request before this one). New user-added parks get district/state
 // from whatever the user enters in the Add Park modal.
 const SOLAR_PARKS = {
-  "SS Nagar Park": { district:"Phalodi", state:"Rajasthan", projects:["wonder3"] },
-  "Pugal":         { district:"Bikaner", state:"Rajasthan", projects:["jsw"] },
-  "Lunkaransar":   { district:"Bikaner", state:"Rajasthan", projects:["ravi","soni","lords","uttam"] },
-  "Bhamatsar":     { district:"Bikaner", state:"Rajasthan", projects:["metallic","ananta"] },
-  "Dechu":         { district:"Phalodi", state:"Rajasthan", projects:["bkt","alliance","siddharth","jecrc","jagdamba","raksha","wonder2","kamdhenu","inox","miracle"] },
-  "Kolayat":       { district:"Bikaner", state:"Rajasthan", projects:["kothari","ask"] },
-  "Panchu":        { district:"Bikaner", state:"Rajasthan", projects:["mec","saville","mangalam"] },
+  "SS Nagar Park": { district:"Phalodi", state:"Rajasthan", projects:["wonder3"], dcCapacity:75.0,  land:118.9, revenuePotential:225 },
+  "Pugal":         { district:"Bikaner", state:"Rajasthan", projects:["jsw"], dcCapacity:75.0,  land:225,   revenuePotential:225 },
+  "Lunkaransar":   { district:"Bikaner", state:"Rajasthan", projects:["ravi","soni","lords","uttam"], dcCapacity:75.0,  land:156.3, revenuePotential:225 },
+  "Bhamatsar":     { district:"Bikaner", state:"Rajasthan", projects:["metallic","ananta"], dcCapacity:45.0,  land:75,    revenuePotential:135 },
+  "Dechu":         { district:"Phalodi", state:"Rajasthan", projects:["bkt","alliance","siddharth","jecrc","jagdamba","raksha","wonder2","kamdhenu","inox","miracle"], dcCapacity:105.0, land:315,   revenuePotential:315 },
+  "Kolayat":       { district:"Bikaner", state:"Rajasthan", projects:["kothari","ask"], dcCapacity:150.0, land:260,   revenuePotential:450 },
+  "Panchu":        { district:"Bikaner", state:"Rajasthan", projects:["mec","saville","mangalam"], dcCapacity:105.0, land:73.6,  revenuePotential:315 },
 };
 
 // ── HELPERS ───────────────────────────────────────────────────

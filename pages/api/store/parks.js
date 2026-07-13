@@ -20,13 +20,16 @@ export default async function handler(req, res) {
   }
 
   if (req.method === 'POST') {
-    const { name, district, state } = req.body;
+    const { name, district, state, dcCapacity, land, revenuePotential } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
 
     const parks = (await storeGet(KEYS.USER_PARKS)) || {};
     parks[name] = {
       district: district || '',
       state:    state    || 'Rajasthan',
+      dcCapacity:       dcCapacity       !== undefined && dcCapacity       !== '' ? Number(dcCapacity)       : null,
+      land:             land             !== undefined && land             !== '' ? Number(land)             : null,
+      revenuePotential: revenuePotential !== undefined && revenuePotential !== '' ? Number(revenuePotential) : null,
       projects: [], // empty — projects attach themselves via their `park` field
       createdAt: new Date().toISOString(),
     };
@@ -36,7 +39,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method === 'PUT') {
-    const { originalName, name, district, state } = req.body;
+    const { originalName, name, district, state, dcCapacity, land, revenuePotential } = req.body;
     if (!originalName || !name) return res.status(400).json({ error: 'originalName and name are required' });
 
     const parks = (await storeGet(KEYS.USER_PARKS)) || {};
@@ -63,6 +66,9 @@ export default async function handler(req, res) {
       ...existing,
       district: district || existing.district || '',
       state:    state    || existing.state    || 'Rajasthan',
+      dcCapacity:       dcCapacity       !== undefined && dcCapacity       !== '' ? Number(dcCapacity)       : (existing.dcCapacity       ?? null),
+      land:             land             !== undefined && land             !== '' ? Number(land)             : (existing.land             ?? null),
+      revenuePotential: revenuePotential !== undefined && revenuePotential !== '' ? Number(revenuePotential) : (existing.revenuePotential ?? null),
       updatedAt: new Date().toISOString(),
     };
     await storeSet(KEYS.USER_PARKS, parks);
