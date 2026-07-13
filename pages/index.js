@@ -1928,6 +1928,7 @@ export default function Dashboard() {
   const [showAddPark,  setShowAddPark]= useState(false);
   const [lastSync,     setLastSync]   = useState(null);
   const [expandedFirms,setExpanded]   = useState({});
+  const [showCredits,  setShowCredits]= useState(false);
   const [errors,       setErrors]     = useState({});
   const [showUpdateRates, setShowUpdateRates] = useState(false);
 
@@ -2108,15 +2109,32 @@ export default function Dashboard() {
           <div style={{position:'absolute',left:'50%',top:'50%',transform:'translate(-50%,-50%)',display:'flex',alignItems:'center',gap:14}}>
             {totalFlag>0 && <div style={{background:'#fee2e2',color:'#b91c1c',padding:'3px 12px',borderRadius:20,fontSize:12,fontWeight:700,border:'1px solid #fca5a5',whiteSpace:'nowrap'}}>{totalFlag} need attention</div>}
             {lastSync && <div style={{fontSize:12,color:'#94a3b8',display:'flex',alignItems:'center',gap:5,whiteSpace:'nowrap'}}><span style={{width:6,height:6,borderRadius:'50%',background:'#22c55e',display:'inline-block'}}/>Live - {lastSync.toLocaleTimeString()}</div>}
-            <div style={{fontSize:13,color:'#64748b',fontWeight:500,whiteSpace:'nowrap'}}>For - Jatin Srivastava</div>
           </div>
 
-          {/* Developer credit - permanent, per explicit request */}
-          <div style={{textAlign:'right',lineHeight:1.3,flexShrink:0}}>
-            <div style={{fontSize:11,fontWeight:700,color:'#0f172a',whiteSpace:'nowrap'}}>Developed by: ASHISH KASWAN</div>
-            <div style={{fontSize:10,color:'#94a3b8',whiteSpace:'nowrap'}}>Business Analyst, Finance Control</div>
+          {/* Team credit + Credits popup trigger */}
+          <div style={{display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
+            <div style={{textAlign:'right',lineHeight:1.3}}>
+              <div style={{fontSize:11,fontWeight:700,color:'#0f172a',whiteSpace:'nowrap'}}>Finance Control Team</div>
+            </div>
+            <button onClick={()=>setShowCredits(true)} style={{fontSize:11,fontWeight:600,color:'#2563eb',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:6,padding:'4px 10px',cursor:'pointer',whiteSpace:'nowrap'}}>Credits</button>
           </div>
         </div>
+
+        {showCredits && (
+          <div onClick={()=>setShowCredits(false)} style={{position:'fixed',inset:0,background:'rgba(15,23,42,0.45)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:'#fff',borderRadius:12,padding:'24px 28px',width:320,boxShadow:'0 10px 40px rgba(0,0,0,0.2)'}}>
+              <div style={{fontSize:15,fontWeight:800,color:'#0f172a',marginBottom:16}}>Credits</div>
+              <div style={{display:'flex',flexDirection:'column',gap:8,fontSize:13,color:'#334155'}}>
+                <div><span style={{color:'#94a3b8'}}>Name: </span><b>Ashish Kaswan</b></div>
+                <div><span style={{color:'#94a3b8'}}>Designation: </span>Business Analyst</div>
+                <div><span style={{color:'#94a3b8'}}>Team: </span>Finance Control</div>
+                <div><span style={{color:'#94a3b8'}}>Dept.: </span>Finance & Accounting</div>
+                <div><span style={{color:'#94a3b8'}}>Firm: </span>Rays Power Experts Ltd.</div>
+              </div>
+              <button onClick={()=>setShowCredits(false)} style={{marginTop:20,width:'100%',padding:'8px 0',borderRadius:8,border:'1px solid #e2e8f0',background:'#f8fafc',color:'#334155',fontWeight:600,fontSize:13,cursor:'pointer'}}>Close</button>
+            </div>
+          </div>
+        )}
 
         <div style={{padding:'14px 24px',display:'grid',gridTemplateColumns:'repeat(8,1fr)',gap:9}}>
           <Card label="POs PENDING" icon={'\u{1F4CB}'} value={pos.length} sub={fmt(poValue)} color="#f59e0b"/>
