@@ -1,0 +1,16 @@
+{
+  "functions": {
+    "pages/api/process-ai-queue.js": {
+      "maxDuration": 300
+    },
+    "pages/api/pos.js": {
+      "maxDuration": 300
+    },
+    "pages/api/bills.js": {
+      "maxDuration": 300
+    },
+    "pages/api/pmos.js": {
+      "maxDuration": 300
+    }
+  }
+}

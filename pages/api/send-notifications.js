@@ -41,8 +41,8 @@ const KNOWN_IDS_VERSION = 2;
 // guarantees the exact same scope Jatin already sees on his dashboard.
 async function getCurrentPendingIds() {
   const [pos, bills] = await Promise.all([
-    getPendingPOs(false),
-    getPendingBills(false),
+    getPendingPOs(true),
+    getPendingBills(true),
   ]);
 
   // Real fix: PMO approval-matching genuinely requires checking
@@ -58,7 +58,7 @@ async function getCurrentPendingIds() {
   let pmoError = null;
   try {
     const siteUrl = process.env.SITE_URL || 'https://finance-dashboard-liard-three.vercel.app';
-    const pmoRes = await axios.get(`${siteUrl}/api/pmos`);
+    const pmoRes = await axios.get(`${siteUrl}/api/pmos?refresh=1`);
     pmos = (pmoRes.data.data || []).map(p => p.id);
   } catch (e) {
     pmoError = e.response?.data ? JSON.stringify(e.response.data) : e.message;

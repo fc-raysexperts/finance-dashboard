@@ -1,7 +1,19 @@
 // pages/api/search.js
-// Search POs or Bills by any keyword
+// Search POs, Bills, or PMOs by any keyword
 
 import { searchPOs, searchBills } from '../../lib/zoho';
+const axios = require('axios');
+const { getAccessToken } = require('../../lib/zohoToken');
+
+const PMO_MODULE = 'cm_payment_memos';
+async function searchPMOs(query) {
+  let token = await getAccessToken();
+  const res = await axios.get(`https://www.zohoapis.in/books/v3/${PMO_MODULE}`, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    params: { organization_id: process.env.ZOHO_ORG_ID, search_text: query, per_page: 50 },
+  });
+  return res.data.module_records || [];
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
@@ -28,6 +40,24 @@ export default async function handler(req, res) {
         total:      b.total,
         status:     b.status,
         date:       b.date,
+      }));
+    } else if (type === 'pmo') {
+      // Real caveat: unlike POs/Bills (standard Zoho modules with a
+      // proven search_text param), this is a custom module — search_text
+      // support here follows the same REST convention but hasn't been
+      // independently verified against live data. If this comes back
+      // empty even for a PMO number you know exists, that's the first
+      // thing to check.
+      const pmos = await searchPMOs(q.trim());
+      results = pmos.map(p => ({
+        id:      p.module_record_id,
+        number:  String(p.record_name || ''),
+        type:    'pmo',
+        vendor:  '', // list endpoint doesn't include custom fields — shown after selecting
+        project: '',
+        total:   null,
+        status:  '',
+        date:    p.last_modified_time ? p.last_modified_time.slice(0, 10) : '',
       }));
     } else {
       // Default: search POs

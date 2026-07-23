@@ -16,6 +16,8 @@
 // clicks Refresh (forceRefresh) or there's no cache yet at all.
 
 import { runPMOCompliance, runPMOAlignment, getComplianceStatus } from '../../lib/checklistEngine';
+import { processAIQueueForPMOs, buildFingerprint } from '../../lib/aiComplianceEngine';
+import { getRecentPMOSignatures } from '../../lib/advanceReconcile';
 const axios = require('axios');
 const { getAccessToken } = require('../../lib/zohoToken');
 const { storeGet, storeSet, KEYS } = require('../../lib/store');
@@ -83,7 +85,7 @@ async function persistStore() {
   await storeSet(KEYS.ZOHO_DELTA_PMOS, { detailCache, checkedSnapshot }).catch(() => {});
 }
 
-function extractFields(moduleFields) {
+export function extractFields(moduleFields) {
   const map = {};
   if (!Array.isArray(moduleFields)) return map;
   moduleFields.forEach(f => {
@@ -219,7 +221,65 @@ export default async function handler(req, res) {
     const jatinPMOs = detailed;
     console.log(`PMOs: ${jatinPMOs.length} currently pending Jatin's approval`);
 
-    const enriched = jatinPMOs.map(raw => {
+    // AI-judged compliance (only material_status needs this) — same
+    // blocking design as POs/Bills: never show an un-checked advance PMO.
+    // Real bug fixed here: the AI batch was previously given the RAW,
+    // unprocessed Zoho records (jatinPMOs) directly — meaning
+    // pmo.pmo_number, pmo.documents, pmo.payment_type all read as
+    // undefined (real field names/shapes only exist after the
+    // extraction below), causing every PMO to collide on the same
+    // "pmo:undefined" cache key, log as "PMO unknown", and never
+    // actually reach a Gemini call at all. This lightweight synchronous
+    // pre-pass extracts the same real fields the full enrichment below
+    // uses (kept minimal and separate from that fuller logic to avoid
+    // risking any of its already-working behavior), so the AI batch
+    // operates on correctly-shaped objects with a stable identity.
+    // Real bug fixed here (found via diagnostic logging): PMOs don't
+    // have a "documents" array like PO/Bill at all — raw.documents was
+    // ALWAYS empty by definition, not a timing issue. PMOs store at most
+    // ONE attachment, via the single custom field cf_attachment /
+    // cf_attachment_formatted (confirmed from the real field usage
+    // elsewhere in this file: attachmentId/attachmentName). Wrapping
+    // that single reference as a 1-item array to match the shape the
+    // rest of the AI pipeline (shared with PO/Bill) expects.
+    function extractPMOKeyFieldsForAI(raw) {
+      const f = extractFields(raw.module_fields);
+      const payCategory = String(f.cf_payment_category    || '');
+      const paySubCat   = String(f.cf_payment_sub_category || '');
+      const payType     = String(f.cf_payment_type         || '');
+      const attachmentId   = String(f.cf_attachment           || '');
+      const attachmentName = String(f.cf_attachment_formatted || '');
+      return {
+        pmo_number:     String(f.cf_pmo_number || raw.record_name || ''),
+        id:             raw.module_record_id,
+        vendor_name:    String(f.cf_vendor_name || '—'),
+        amount:         parseFloat(f.cf_payable_amount) || 0,
+        remarks:        String(f.cf_remarks || ''),
+        paymentDetails: String(f.cf_payment_details || ''),
+        payment_type:   [payCategory, paySubCat, payType].filter(Boolean).join(' / '),
+        documents:      attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'attachment' }] : [],
+        approvers_list: raw.approvers_list || [],
+      };
+    }
+    const pmoNormListForAI = jatinPMOs.map(extractPMOKeyFieldsForAI);
+    console.log(`[AI PMO pre-pass] doc counts: ${pmoNormListForAI.map(p => `${p.pmo_number}:${(p.documents||[]).length}`).join(', ')}`);
+
+    console.time('[TIMING] processAIQueueForPMOs');
+    const aiQueueResult = await processAIQueueForPMOs(pmoNormListForAI, { timeBudgetMs: 260000 });
+    console.timeEnd('[TIMING] processAIQueueForPMOs');
+    if (aiQueueResult.stoppedReason) {
+      console.warn(`AI queue stopped early for PMOs: ${aiQueueResult.stoppedReason} (${aiQueueResult.processed}/${aiQueueResult.totalNeeded} completed)`);
+    }
+    const aiCache = (await storeGet(KEYS.AI_COMPLIANCE_CACHE)) || {};
+
+    // Real historical data for the Duplicate Payment Check — fetched
+    // once per request, not once per PMO.
+    console.time('[TIMING] getRecentPMOSignatures');
+    const pmoSignatures = await getRecentPMOSignatures().catch(() => []);
+    console.timeEnd('[TIMING] getRecentPMOSignatures');
+
+    console.time('[TIMING] enrich all PMOs (map)');
+    const enriched = await Promise.all(jatinPMOs.map(async raw => {
       const f = extractFields(raw.module_fields);
 
       const pmoNumber    = String(f.cf_pmo_number || raw.record_name || '');
@@ -328,7 +388,7 @@ export default async function handler(req, res) {
         remarks,
         paymentDetails,
         payment_type:      payTypeLabel,
-        documents:         raw.documents || [],
+        documents:         attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'attachment' }] : [],
         submitted_by_name: raw.submitted_by_name || '',
         closing_balance:   closingBal,
         approvers_list:    raw.approvers_list || [],
@@ -336,7 +396,11 @@ export default async function handler(req, res) {
         expenseBreakup,
       };
 
-      const compliance = runPMOCompliance(pmoNorm);
+      const aiCacheKeyPMO   = `pmo:${pmoNorm.pmo_number || pmoNorm.id}`;
+      const aiCacheEntryPMO = aiCache[aiCacheKeyPMO];
+      const aiFingerprintPMO = buildFingerprint(pmoNorm);
+      const aiResultsForThisPMO = (aiCacheEntryPMO && aiCacheEntryPMO.fingerprint === aiFingerprintPMO) ? aiCacheEntryPMO.results : {};
+      const compliance = await runPMOCompliance(pmoNorm, pmoSignatures, aiResultsForThisPMO);
       const alignment  = runPMOAlignment(pmoNorm, null);
       const compStatus = getComplianceStatus(compliance);
 
@@ -366,7 +430,7 @@ export default async function handler(req, res) {
         submittedBy:     raw.submitted_by_name || '',
         submittedDate:   raw.submitted_date    || '',
         status:          raw.status,
-        docs:            raw.documents || [],
+        docs:            attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'attachment' }] : [],
         lineItems:       [],
         complianceStatus: compStatus,
         alignmentStatus:  alignment.status,
@@ -374,7 +438,8 @@ export default async function handler(req, res) {
         alignment,
         recommendation:  buildRec(compStatus, compliance),
       };
-    });
+    }));
+    console.timeEnd('[TIMING] enrich all PMOs (map)');
 
     enriched.sort((a, b) => {
       if (!a.date) return 1;
@@ -387,6 +452,7 @@ export default async function handler(req, res) {
       count:   enriched.length,
       data:    enriched,
       debug: { pending: detailed.length, jatin: jatinPMOs.length },
+      aiQueue: { completedFully: aiQueueResult.completedFully, processed: aiQueueResult.processed, totalNeeded: aiQueueResult.totalNeeded, stoppedReason: aiQueueResult.stoppedReason },
     });
 
   } catch (err) {

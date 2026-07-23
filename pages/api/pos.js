@@ -15,6 +15,8 @@ import { getPendingPOs } from '../../lib/zoho';
 import { generatePFB, checkPOAlignment, isSevere, isCaution, nameSimilarity } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runPOCompliance, getComplianceStatus } from '../../lib/checklistEngine';
+import { getAdvancePaidByPO } from '../../lib/advanceReconcile';
+const { buildFingerprint, processAIQueueForPOs } = require('../../lib/aiComplianceEngine');
 import { buildReferenceRateRow } from '../../lib/referenceRates';
 const { storeGet, KEYS } = require('../../lib/store');
 
@@ -34,15 +36,42 @@ export default async function handler(req, res) {
     // when the user explicitly clicked Refresh; a normal page load serves
     // from the persisted cache with zero Zoho calls.
     const forceRefresh = req.query.refresh === '1';
+    console.time('[TIMING] getPendingPOs');
     const pos = await getPendingPOs(forceRefresh);
+    console.timeEnd('[TIMING] getPendingPOs');
     console.log(`pos: ${pos.length} currently pending Jatin's approval`);
 
     // Reference Rate data loaded ONCE per request, not per-PO - shared
     // across every PO in this response.
     const rrCatalog = await storeGet(KEYS.REFERENCE_RATE_CATALOG).catch(() => null) || {};
     const rrHistory = await storeGet(KEYS.REFERENCE_RATE_HISTORY).catch(() => null) || {};
+    // Fetched once per request (cached ~15min inside), not once per PO —
+    // real advance-paid-so-far data for check #17 (Advance Reconciliation).
+    console.time('[TIMING] getAdvancePaidByPO');
+    const advancePaidByPO = await getAdvancePaidByPO().catch(() => ({}));
+    console.timeEnd('[TIMING] getAdvancePaidByPO');
+    // AI-judged compliance is now a BLOCKING step, by explicit design
+    // decision: the tab must never render a PO with "Pending AI review"
+    // showing unless AI genuinely couldn't finish (quota exhausted, or
+    // running low on time within this serverless function's execution
+    // window) — see processAIQueueForPOs' two stop conditions. On a
+    // normal day, with the hourly cron keeping things pre-warmed, most
+    // loads should find nothing new to process here and pass through
+    // near-instantly; this only does real work when something's
+    // genuinely new/changed since the last check.
+    console.time('[TIMING] processAIQueueForPOs');
+    const aiQueueResult = await processAIQueueForPOs(pos, { timeBudgetMs: 260000 });
+    console.timeEnd('[TIMING] processAIQueueForPOs');
+    if (aiQueueResult.stoppedReason) {
+      console.warn(`AI queue stopped early for POs: ${aiQueueResult.stoppedReason} (${aiQueueResult.processed}/${aiQueueResult.totalNeeded} completed)`);
+    }
 
-    const enriched = pos.map(po => {
+    // AI-judged compliance results — read fresh AFTER the batch above,
+    // since that batch just updated this same cache in place.
+    const aiCache = (await storeGet(KEYS.AI_COMPLIANCE_CACHE)) || {};
+
+    console.time('[TIMING] enrich all POs (map)');
+    const enriched = await Promise.all(pos.map(async po => {
       const lineItems = po.line_items || [];
 
       // Same fix as bills.js: TDS-type deductions live in tds_summary, a
@@ -109,7 +138,16 @@ export default async function handler(req, res) {
 
       // ── COMPLIANCE CHECK (always runs, regardless of PFB) — now passes
       // pfbTotal for the new Budget Availability check.
-      const compliance       = runPOCompliance(po, pfbTotal);
+      const aiCacheKey    = `po:${po.purchaseorder_id || po.purchaseorder_number}`;
+      const aiCacheEntry  = aiCache[aiCacheKey];
+      const aiFingerprint = buildFingerprint(po);
+      // Only use the cached AI results if they're for the CURRENT state
+      // of this PO (fingerprint match) — if notes/attachments/approvers
+      // changed since the last AI check, fall back to the local
+      // keyword-heuristic (clearly labeled) until the background job
+      // catches up and re-judges it.
+      const aiResultsForThisPO = (aiCacheEntry && aiCacheEntry.fingerprint === aiFingerprint) ? aiCacheEntry.results : {};
+      const compliance       = await runPOCompliance(po, pfbTotal, advancePaidByPO, aiResultsForThisPO);
       const complianceStatus = getComplianceStatus(compliance);
 
       // ── FINAL RECOMMENDATION based on BOTH checks
@@ -201,7 +239,8 @@ export default async function handler(req, res) {
 
         recommendation,
       };
-    });
+    }));
+    console.timeEnd('[TIMING] enrich all POs (map)');
 
     const ORDER = { fail:0, reject:0, warn:1, flag:1, pass:2, aligned:2, na:3 };
     enriched.sort((a,b) =>
@@ -209,7 +248,10 @@ export default async function handler(req, res) {
       Math.min(ORDER[b.complianceStatus]??9, ORDER[b.alignmentStatus]??9)
     );
 
-    return res.status(200).json({ success:true, count:enriched.length, data:enriched });
+    return res.status(200).json({
+      success:true, count:enriched.length, data:enriched,
+      aiQueue: { completedFully: aiQueueResult.completedFully, processed: aiQueueResult.processed, totalNeeded: aiQueueResult.totalNeeded, stoppedReason: aiQueueResult.stoppedReason },
+    });
 
   } catch (err) {
     console.error('POs API error:', err.message);
@@ -220,38 +262,29 @@ export default async function handler(req, res) {
 function buildRecommendation(compStatus, alignStatus, compliance) {
   const critFails = compliance.filter(c => !c.passed && ['po_basic','vendor_details','gst_type','ld_clause'].includes(c.id));
 
-  if (compStatus === 'fail' || alignStatus === 'reject') {
+  // Recommendation is now driven ONLY by Compliance Check status —
+  // PFB Alignment already has its own dedicated table on this screen,
+  // so surfacing it a second time here (and letting it drive REJECT/FLAG)
+  // was redundant, and the PFB scope currently doesn't cover all items
+  // the firm actually uses, so it isn't reliable enough yet to gate a
+  // recommendation decision on its own.
+  if (compStatus === 'fail') {
     return {
       decision: 'REJECT',
       color: 'red',
-      reasons: [
-        ...(compStatus === 'fail' ? critFails.map(c => c.comment) : []),
-        ...(alignStatus === 'reject' ? ['PFB budget exceeded — management approval required'] : []),
-      ],
+      reasons: critFails.map(c => c.comment),
     };
   }
-  if (compStatus === 'warn' || alignStatus === 'flag') {
+  if (compStatus === 'warn') {
     return {
       decision: 'FLAG FOR REVIEW',
       color: 'amber',
-      reasons: [
-        ...(compStatus === 'warn' ? compliance.filter(c=>!c.passed).map(c=>c.comment) : []),
-        ...(alignStatus === 'flag' ? ['One or more items have PFB variance > 10%'] : []),
-      ],
-    };
-  }
-  if (alignStatus === 'na') {
-    return {
-      decision: compStatus === 'pass' ? 'APPROVE (No PFB)' : 'FLAG FOR REVIEW',
-      color: compStatus === 'pass' ? 'green' : 'amber',
-      reasons: compStatus === 'pass'
-        ? ['All compliance checks passed', 'No PFB scope match — items outside standard budget (acceptable)']
-        : compliance.filter(c=>!c.passed).map(c=>c.comment),
+      reasons: compliance.filter(c=>!c.passed).map(c=>c.comment),
     };
   }
   return {
     decision: 'APPROVE',
     color: 'green',
-    reasons: ['All compliance checks passed', 'All PFB alignment checks passed'],
+    reasons: ['All compliance checks passed'],
   };
 }

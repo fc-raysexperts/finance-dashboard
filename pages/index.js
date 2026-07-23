@@ -75,7 +75,7 @@ function rateColor(ratePerWp) {
 
 // ----- BADGES -----
 function CompBadge({ s }) {
-  const m = { pass:{bg:'#dcfce7',c:'#15803d',t:'PASS'}, warn:{bg:'#fef9c3',c:'#a16207',t:'WARNINGS'}, fail:{bg:'#fee2e2',c:'#b91c1c',t:'FAILED'} };
+  const m = { pass:{bg:'#dcfce7',c:'#15803d',t:'PASS'}, warn:{bg:'#fef9c3',c:'#a16207',t:'WARNINGS'}, fail:{bg:'#fee2e2',c:'#b91c1c',t:'FAILED'}, pending:{bg:'#e0f2fe',c:'#0369a1',t:'AI REVIEW PENDING'} };
   const v = m[s]||{bg:'#f1f5f9',c:'#64748b',t:String.fromCharCode(8212)};
   return <span style={{background:v.bg,color:v.c,padding:'2px 8px',borderRadius:4,fontSize:11,fontWeight:700,border:'1px solid ' + v.c + '33',whiteSpace:'nowrap'}}>{v.t}</span>;
 }
@@ -251,28 +251,131 @@ function RecBox({ rec }) {
 }
 
 // ----- COMPLIANCE TABLE -----
-function CompTable({ checks, title }) {
+function CompTable({ checks, title, pbpType, pbpId, onRecheckDone }) {
+  const [rechecking, setRechecking] = useState(false);
+  const [recheckError, setRecheckError] = useState(null);
   if (!checks || !checks.length) return null;
-  const pass = checks.filter(function(c){return c.passed;}).length;
+  async function handleRecheck() {
+    setRechecking(true); setRecheckError(null);
+    try {
+      const r = await fetch('/api/recheck-compliance', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ type: pbpType, id: pbpId }),
+      });
+      const d = await r.json();
+      if (!d.success) { setRecheckError(d.error || 'Re-check failed'); }
+      else if (onRecheckDone) { onRecheckDone(); }
+    } catch (e) {
+      setRecheckError(e.message);
+    }
+    setRechecking(false);
+  }
+  // Only count definite pass/fail toward the "X/Y passed" summary —
+  // pending (not yet analyzed) and uncertain (analyzed, but only a
+  // degraded/proxy answer was possible) are neither, and shouldn't be
+  // silently folded into "failed" or "passed" just for a tidy fraction.
+  const pass = checks.filter(function(c){return c.passed === true;}).length;
+  const definiteCount = checks.filter(function(c){return c.passed === true || c.passed === false;}).length;
   return (
     <div style={{marginBottom:20}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
-        <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',margin:0}}>{title}</h3>
-        <span style={{fontSize:11,color:'#64748b'}}>{pass}/{checks.length} passed</span>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',margin:0}}>{title}</h3>
+          {pbpType && pbpId && (
+            <button onClick={handleRecheck} disabled={rechecking}
+              style={{background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'2px 9px',fontSize:11,fontWeight:600,cursor:rechecking?'default':'pointer',opacity:rechecking?0.6:1,whiteSpace:'nowrap'}}>
+              {rechecking ? '\u{1F504} Re-checking...' : '\u{1F504} Re-check Compliances'}
+            </button>
+          )}
+        </div>
+        <span style={{fontSize:11,color:'#64748b'}}>{pass}/{definiteCount} passed</span>
       </div>
+      {recheckError && <div style={{background:'#fff1f2',color:'#dc2626',border:'1px solid #fecaca',borderRadius:6,padding:'6px 10px',fontSize:11,marginBottom:8}}>{recheckError}</div>}
       <div style={{border:'1px solid #e2e8f0',borderRadius:8,overflow:'hidden'}}>
         {checks.map(function(c,i){
-          return (
-            <div key={i} style={{display:'flex',alignItems:'flex-start',gap:8,padding:'8px 12px',background:i%2?'#f8fafc':'#fff',borderBottom:i<checks.length-1?'1px solid #f1f5f9':'none'}}>
-              <span style={{fontSize:13,marginTop:1,flexShrink:0}}>{c.passed?'\u2705':'\u274C'}</span>
-              <div style={{flex:1}}>
-                <span style={{fontWeight:600,color:'#334155',fontSize:12}}>{c.name}: </span>
-                <span style={{color:c.passed?'#64748b':'#dc2626',fontSize:12}}>{c.comment}</span>
-              </div>
-              {c.value&&<span style={{fontSize:11,color:'#94a3b8',flexShrink:0,maxWidth:160,textAlign:'right'}}>{c.value}</span>}
-            </div>
-          );
+          // Three real states, not two: a check that couldn't be
+          // definitively verified must NEVER show a tick or a cross —
+          // both of those claim a certainty that isn't there.
+          //   true       -> ✅ genuinely confirmed
+          //   false      -> ❌ genuinely failed/missing
+          //   null       -> ⏳ pending — hasn't been analyzed yet at all
+          //   'uncertain'-> ❔ analyzed, but only a narrower/fallback
+          //                  check was possible (e.g. no GSTR-2B document
+          //                  was available to verify against, so only
+          //                  GSTIN format validity could be checked)
+          const icon = c.passed === true ? '\u2705'
+            : c.passed === false ? '\u274C'
+            : c.passed === 'uncertain' ? '\u2754'
+            : '\u23F3';
+          const textColor = c.passed === true ? '#15803d'
+            : c.passed === false ? '#dc2626'
+            : c.passed === 'uncertain' ? '#a16207'
+            : '#0369a1';
+          return <CompRow key={i} c={c} icon={icon} textColor={textColor} isLast={i===checks.length-1} zebra={i%2?'#f8fafc':'#fff'}/>;
         })}
+      </div>
+    </div>
+  );
+}
+
+// Each CC gets its own 2-line row: line 1 is the name + verdict icon +
+// the short "value" summary (right-aligned); line 2 is the FULL
+// explanation, taking the entire row width. Long explanations (common
+// for AI-verified checks) are clamped to 3 lines by default so the table
+// stays scannable — hovering the (i) icon shows the complete,
+// un-clamped text in a floating tooltip, the same pattern used on many
+// sites for "hover the info icon for the full detail".
+function CompRow({ c, icon, textColor, isLast, zebra }) {
+  const [showTip, setShowTip] = useState(false);
+  const [isOverflowing, setIsOverflowing] = useState(false);
+  const textRef = useRef(null);
+  const comment = c.comment || '';
+
+  useEffect(function(){
+    // Real DOM measurement instead of a character-count guess — a fixed
+    // char count can't account for actual popup width, font rendering,
+    // or how many wide characters/numbers are in the text.
+    // scrollWidth > clientWidth reliably detects that a
+    // white-space:nowrap + ellipsis line has genuinely been truncated.
+    const el = textRef.current;
+    if (el) setIsOverflowing(el.scrollWidth > el.clientWidth + 1);
+  }, [comment]);
+
+  return (
+    <div style={{padding:'10px 12px',background:zebra,borderBottom:isLast?'none':'1px solid #f1f5f9'}}>
+      <div style={{display:'flex',alignItems:'baseline',gap:8,marginBottom:4}}>
+        <span style={{fontSize:13,flexShrink:0}}>{icon}</span>
+        <span style={{fontWeight:700,color:'#0f172a',fontSize:12.5,flex:1}}>{c.name}</span>
+        {c.value && <span style={{fontSize:11,color:'#94a3b8',flexShrink:0,textAlign:'right'}}>{c.value}</span>}
+      </div>
+      <div style={{display:'flex',alignItems:'flex-start',gap:6,paddingLeft:21}}>
+        <div ref={textRef} style={{
+          flex:1, fontSize:12, lineHeight:1.5, color:textColor,
+          whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
+        }}>
+          {comment}
+        </div>
+        {isOverflowing && (
+          <div style={{position:'relative',flexShrink:0}}
+            onMouseEnter={function(){setShowTip(true);}}
+            onMouseLeave={function(){setShowTip(false);}}>
+            <span style={{display:'inline-flex',alignItems:'center',justifyContent:'center',width:16,height:16,borderRadius:'50%',background:'#e2e8f0',color:'#475569',fontSize:10,fontWeight:700,cursor:'help'}}>i</span>
+            {showTip && (
+              <div style={{
+                position:'absolute', right:0, zIndex:50, width:320, maxWidth:'70vw',
+                background:'#0f172a', color:'#f1f5f9', fontSize:12, lineHeight:1.5,
+                borderRadius:8, padding:'10px 12px', boxShadow:'0 8px 24px rgba(0,0,0,0.25)',
+                // Only the LAST row in the table shows its tooltip ABOVE
+                // the icon instead of below — a below-positioned tooltip
+                // on the final row gets clipped by the popup's own
+                // bottom edge/scroll boundary, making it unreadable.
+                ...(isLast ? {bottom:'120%'} : {top:'120%'}),
+              }}>
+                {comment}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1586,7 +1689,7 @@ function Attachments({ docs, onPreview }) {
 }
 
 // ----- DETAIL MODAL (PO / BILL / PMO) -----
-function DetailModal({ item, type, onClose }) {
+function DetailModal({ item, type, onClose, onRecheckDone }) {
   const isBill = type === 'bill', isPMO = type === 'pmo';
   const [fullTextView, setFullTextView] = useState(null); // {label, text} - only used for genuinely long Notes/Terms that would take up too much of the popup inline
   const [attachmentPreview, setAttachmentPreview] = useState(null); // {name, docType, docId} - opens a nested modal with the real PDF embedded
@@ -1800,7 +1903,7 @@ function DetailModal({ item, type, onClose }) {
         </div>
       )}
       <RecBox rec={item.recommendation}/>
-      <CompTable checks={item.compliance} title={(isPMO?'PMO':isBill?'Bill':'PO') + ' Compliance Checks'}/>
+      <CompTable checks={item.compliance} title={(isPMO?'PMO':isBill?'Bill':'PO') + ' Compliance Checks'} pbpType={type} pbpId={item.id} onRecheckDone={onRecheckDone}/>
       {!isPMO && pfbChecks && pfbChecks.length>0 && <PFBAlignmentTable checks={pfbChecks} title="PFB Alignment - Line by Line"/>}
       {!isPMO && (!pfbChecks || pfbChecks.length===0) && pfbUnavailableReason && (
         <div style={{background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:8,padding:'10px 14px',marginBottom:20,fontSize:13,color:'#9a3412'}}>
@@ -1832,12 +1935,12 @@ function DetailModal({ item, type, onClose }) {
     {attachmentPreview && (
       <Modal onClose={function(){setAttachmentPreview(null);}} width={800} title={attachmentPreview.name} zIndex={1100}>
         <iframe
-          src={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}`}
+          src={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}`}
           style={{width:'100%',height:'70vh',border:'1px solid #e2e8f0',borderRadius:8}}
           title={attachmentPreview.name}
         />
         <div style={{marginTop:8,textAlign:'right'}}>
-          <a href={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
+          <a href={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
             Open in new tab / download
           </a>
         </div>
@@ -1875,7 +1978,7 @@ function SearchBox({ type, onClose, onSelect }) {
       <div style={{background:'#fff',borderRadius:14,width:'100%',maxWidth:560,overflow:'hidden',boxShadow:'0 24px 64px rgba(0,0,0,0.2)',border:'1px solid #e2e8f0'}}>
         <div style={{padding:'12px 16px',borderBottom:'1px solid #f1f5f9',display:'flex',gap:10,alignItems:'center'}}>
           <span style={{fontSize:15,color:'#94a3b8'}}>Search</span>
-          <input autoFocus value={q} onChange={function(e){setQ(e.target.value);}} placeholder={'Search ' + (type==='bill'?'Bills':'POs') + '...'}
+          <input autoFocus value={q} onChange={function(e){setQ(e.target.value);}} placeholder={'Search ' + (type==='bill'?'Bills':type==='pmo'?'PMOs':'POs') + '...'}
             style={{flex:1,border:'none',outline:'none',fontSize:14,color:'#0f172a'}}/>
           <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',fontSize:18,color:'#94a3b8'}}>&times;</button>
         </div>
@@ -1903,7 +2006,94 @@ function SearchBox({ type, onClose, onSelect }) {
   );
 }
 
-// ----- LOGIN GATE -----
+// ----- SIMPLIFIED SEARCH RESULT DETAIL VIEW -----
+// Deliberately minimal: General Details + Items table + Attachments
+// only. No Compliance Checks, no Recommendation, no PFB/Match/Reference-
+// Rate tables — this is for quickly looking up any past PBP in the
+// firm's full history, not for re-running the approval workflow on it.
+function SearchResultModal({ type, id, onClose }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [attachmentPreview, setAttachmentPreview] = useState(null);
+
+  useEffect(function(){
+    let cancelled = false;
+    setLoading(true); setError(null);
+    fetch(`/api/search-detail?type=${type}&id=${id}`)
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (cancelled) return;
+        if (d.success) setData(d.data); else setError(d.error || 'Could not load details');
+      })
+      .catch(function(e){ if (!cancelled) setError(e.message); })
+      .finally(function(){ if (!cancelled) setLoading(false); });
+    return function(){ cancelled = true; };
+  }, [type, id]);
+
+  const typeLabel = type==='pmo' ? 'PMO' : type==='bill' ? 'Bill' : 'PO';
+
+  return (
+    <Modal onClose={onClose} title={typeLabel + ' Details'} width={780}>
+      {loading && <div style={{padding:30,textAlign:'center',color:'#94a3b8',fontSize:13}}>Loading...</div>}
+      {error && <div style={{background:'#fff1f2',color:'#dc2626',border:'1px solid #fecaca',borderRadius:8,padding:'10px 14px',fontSize:13}}>{error}</div>}
+      {data && (
+        <>
+          <InfoGrid fields={data.sectionA} cols={3}/>
+          {data.addressRows && <InfoGridCustom rows={data.addressRows}/>}
+          <InfoGrid fields={data.sectionC} cols={3}/>
+          {data.customFields && <InfoGrid fields={data.customFields} cols={3}/>}
+          {data.notes && (
+            <div style={{background:'#f8fafc',borderRadius:10,padding:'14px 18px',marginBottom:16}}>
+              <div style={{fontSize:11,color:'#94a3b8',fontWeight:700,letterSpacing:'0.08em',marginBottom:4}}>NOTES{data.terms?' / TERMS & CONDITIONS':''}</div>
+              <div style={{fontSize:13,color:'#0f172a',whiteSpace:'pre-wrap'}}>{data.notes}</div>
+              {data.terms && <div style={{fontSize:13,color:'#0f172a',whiteSpace:'pre-wrap',marginTop:8}}>{data.terms}</div>}
+            </div>
+          )}
+          {data.poBreakup && data.poBreakup.length > 0 && (
+            <div style={{marginBottom:16}}>
+              <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:8}}>PO Breakup</h3>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,border:'1px solid #e2e8f0',borderRadius:8}}>
+                <thead><tr style={{background:'#f8fafc'}}>
+                  <th style={{textAlign:'left',padding:'6px 10px',color:'#475569'}}>PO Number</th>
+                  <th style={{textAlign:'right',padding:'6px 10px',color:'#475569'}}>Basic</th>
+                  <th style={{textAlign:'right',padding:'6px 10px',color:'#475569'}}>Tax</th>
+                  <th style={{textAlign:'right',padding:'6px 10px',color:'#475569'}}>Total</th>
+                </tr></thead>
+                <tbody>{data.poBreakup.map(function(r,i){
+                  return <tr key={i} style={{borderTop:'1px solid #f1f5f9'}}>
+                    <td style={{padding:'6px 10px'}}>{r.po_number}</td>
+                    <td style={{padding:'6px 10px',textAlign:'right'}}>{fmt(r.basic)}</td>
+                    <td style={{padding:'6px 10px',textAlign:'right'}}>{fmt(r.tax)}</td>
+                    <td style={{padding:'6px 10px',textAlign:'right'}}>{fmt(r.total)}</td>
+                  </tr>;
+                })}</tbody>
+              </table>
+            </div>
+          )}
+          <ItemsTable items={data.lineItems} title={type==='pmo'?'Expense Breakup':'Items'} total={data.total} subTotal={data.subTotal}/>
+          <Attachments docs={data.docs} onPreview={setAttachmentPreview}/>
+        </>
+      )}
+      {attachmentPreview && (
+        <Modal onClose={function(){setAttachmentPreview(null);}} width={800} title={attachmentPreview.name} zIndex={1100}>
+          <iframe
+            src={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}`}
+            title={attachmentPreview.name}
+            style={{width:'100%',height:'70vh',border:'none'}}
+          />
+          <div style={{marginTop:10}}>
+            <a href={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
+              Open in new tab
+            </a>
+          </div>
+        </Modal>
+      )}
+    </Modal>
+  );
+}
+
+
 // Replaces the old middleware.js/proxy.js approach. Next.js 16 renamed the
 // middleware file convention to "proxy.js", and that rename runs into a
 // confirmed, Next.js-team-tracked bug where Proxy silently does not execute
@@ -1951,11 +2141,15 @@ export default function Dashboard() {
   const [projDetail,   setProjDetail] = useState(null);
   const [parkDetail,   setParkDetail] = useState(null);
   const [showSearch,   setSearch]     = useState(null);
+  const [searchResult, setSearchResult] = useState(null); // {type, id} of a selected search result — opens the simplified detail view
   const [showAddProj,  setShowAddProj]= useState(false);
   const [showAddPark,  setShowAddPark]= useState(false);
   const [lastSync,     setLastSync]   = useState(null);
   const [expandedFirms,setExpanded]   = useState({});
   const [showCredits,  setShowCredits]= useState(false);
+  const [complianceQueueStatus, setComplianceQueueStatus] = useState({ running: false, percent: 100, processed: 0, total: 0 });
+  const [billComplianceQueueStatus, setBillComplianceQueueStatus] = useState({ running: false, percent: 100, processed: 0, total: 0 });
+  const [pmoComplianceQueueStatus, setPmoComplianceQueueStatus] = useState({ running: false, percent: 100, processed: 0, total: 0 });
   const [errors,       setErrors]     = useState({});
   const [showUpdateRates, setShowUpdateRates] = useState(false);
 
@@ -2041,15 +2235,110 @@ export default function Dashboard() {
     XLSX.writeFile(wb, 'Solar_Parks_' + new Date().toISOString().slice(0,10) + '.xlsx');
   };
 
+  // Returns true only Mon-Sat, 10am-6pm IST — matches the server-side
+  // cron's own working-hours window, so a tab left open overnight/on a
+  // Sunday doesn't fire pointless Zoho calls (the server wouldn't have
+  // anything new to find outside that window anyway, since that's when
+  // the cron itself runs).
+  function isWithinWorkingHoursIST() {
+    const now = new Date();
+    const istString = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+    const ist = new Date(istString);
+    const day = ist.getDay(); // 0=Sun...6=Sat
+    const hour = ist.getHours();
+    return day >= 1 && day <= 6 && hour >= 10 && hour < 18;
+  }
+
   useEffect(function(){
     // Page load/reload: serve from whatever's cached server-side — this
     // costs zero Zoho calls once a cache exists (see lib/zoho.js / pmos.js).
-    // Only the Refresh button (forceRefresh=true) or this 24-hour timer
-    // actually pulls fresh data from Zoho.
     fetchPOs(false); fetchBills(false); fetchPMOs(false); fetchProjects();
-    const iv = setInterval(function(){ fetchPOs(true); fetchBills(true); fetchPMOs(true); }, 24*60*60*1000);
+
+    // Hourly auto-refresh while this tab is left open — mirrors the
+    // server-side cron's own 10am-6pm IST Mon-Sat window, so an open
+    // browser tab actually picks up what the cron just computed instead
+    // of silently showing a stale snapshot all day.
+    const iv = setInterval(function(){
+      if (!isWithinWorkingHoursIST()) return;
+      fetchPOs(true); fetchBills(true); fetchPMOs(true);
+    }, 60*60*1000);
     return function(){ clearInterval(iv); };
   }, [fetchPOs, fetchBills, fetchPMOs, fetchProjects]);
+
+  // Poll the AI compliance queue's live status — purely for DISPLAY.
+  // This must NEVER trigger its own data fetch: the original request
+  // that started AI processing (pos.js itself blocks until the whole
+  // batch is done) already returns the complete, fully-checked list
+  // directly to whoever triggered it. An earlier version of this code
+  // additionally called fetchPOs() here whenever a run was detected as
+  // "just finished" — that was redundant AND actively harmful: it fired
+  // a second, independent /api/pos request that could race ahead of the
+  // original (explaining data appearing before the % reached 100), and
+  // its own eventual completion re-triggered this same detection again —
+  // a genuine infinite loop. Fixed by making this purely observational.
+  // Adaptive polling — fast (5s) WHILE a run is actively in progress, so
+  // the live "%" is actually visible; slow (60s) when idle, to keep
+  // server load low the rest of the time. A fixed 60s interval (the
+  // earlier version) meant a typical run — often finishing in under a
+  // minute — could complete entirely between two polls, so the live %
+  // was never actually seen, just an instant jump to "Checked
+  // Compliances". Self-rescheduling (setTimeout, not setInterval) lets
+  // the delay change dynamically based on the last response.
+  useEffect(function(){
+    let cancelled = false;
+    let timer = null;
+    async function poll() {
+      try {
+        const r = await fetch('/api/ai-queue-status');
+        const d = await r.json();
+        if (cancelled) return;
+        setComplianceQueueStatus(d);
+        timer = setTimeout(poll, d.running ? 5000 : 60000);
+      } catch (e) {
+        if (!cancelled) timer = setTimeout(poll, 60000);
+      }
+    }
+    poll();
+    return function(){ cancelled = true; if (timer) clearTimeout(timer); };
+  }, []);
+
+  // Same adaptive pattern for the Bills tab's own independent AI queue status.
+  useEffect(function(){
+    let cancelled = false;
+    let timer = null;
+    async function poll() {
+      try {
+        const r = await fetch('/api/ai-queue-status-bill');
+        const d = await r.json();
+        if (cancelled) return;
+        setBillComplianceQueueStatus(d);
+        timer = setTimeout(poll, d.running ? 5000 : 60000);
+      } catch (e) {
+        if (!cancelled) timer = setTimeout(poll, 60000);
+      }
+    }
+    poll();
+    return function(){ cancelled = true; if (timer) clearTimeout(timer); };
+  }, []);
+
+  // Same adaptive pattern for the PMOs tab's own independent AI queue status.
+  useEffect(function(){
+    let cancelled = false;
+    let timer = null;
+    async function poll() {
+      try {
+        const r = await fetch('/api/ai-queue-status-pmo');
+        const d = await r.json();
+        if (cancelled) return;
+        setPmoComplianceQueueStatus(d);
+        timer = setTimeout(poll, d.running ? 5000 : 60000);
+      } catch (e) {
+        if (!cancelled) timer = setTimeout(poll, 60000);
+      }
+    }
+    poll();
+    return function(){ cancelled = true; if (timer) clearTimeout(timer); };
+  }, []);
 
   const sortByDate = function(arr, field) {
     return arr.slice().sort(function(a,b){
@@ -2195,7 +2484,34 @@ export default function Dashboard() {
           <div style={{display:'flex',gap:7}}>
             {['pos','bills','pmos'].indexOf(tab)>=0 && (
               <>
-                {tab!=='pmos' && <button onClick={function(){setSearch(tab==='bills'?'bill':'po');}} style={{background:'#f8fafc',color:'#475569',border:'1px solid #e2e8f0',borderRadius:7,padding:'5px 11px',cursor:'pointer',fontSize:12}}>Search</button>}
+                {tab==='pos' && (
+                  <button disabled style={{background: complianceQueueStatus.running ? '#eff6ff' : (complianceQueueStatus.stoppedReason ? '#fff7ed' : '#f0fdf4'), color: complianceQueueStatus.running ? '#1d4ed8' : (complianceQueueStatus.stoppedReason ? '#c2410c' : '#15803d'), border:'1px solid ' + (complianceQueueStatus.running ? '#bfdbfe' : (complianceQueueStatus.stoppedReason ? '#fed7aa' : '#bbf7d0')), borderRadius:7, padding:'5px 11px', fontSize:12, fontWeight:600, whiteSpace:'nowrap', cursor:'default', opacity:1}}>
+                    {complianceQueueStatus.running
+                      ? `\u{1F50D} Checking Compliances... ${complianceQueueStatus.percent}% (${complianceQueueStatus.processed}/${complianceQueueStatus.total})`
+                      : complianceQueueStatus.stoppedReason
+                        ? `\u26A0 Partial — ${complianceQueueStatus.stoppedReason === 'quota_exceeded' ? 'AI quota limit reached' : 'time limit reached'} (${complianceQueueStatus.processed}/${complianceQueueStatus.total} done)`
+                        : `Checked Compliances \u2714\uFE0F`}
+                  </button>
+                )}
+                {tab==='bills' && (
+                  <button disabled style={{background: billComplianceQueueStatus.running ? '#eff6ff' : (billComplianceQueueStatus.stoppedReason ? '#fff7ed' : '#f0fdf4'), color: billComplianceQueueStatus.running ? '#1d4ed8' : (billComplianceQueueStatus.stoppedReason ? '#c2410c' : '#15803d'), border:'1px solid ' + (billComplianceQueueStatus.running ? '#bfdbfe' : (billComplianceQueueStatus.stoppedReason ? '#fed7aa' : '#bbf7d0')), borderRadius:7, padding:'5px 11px', fontSize:12, fontWeight:600, whiteSpace:'nowrap', cursor:'default', opacity:1}}>
+                    {billComplianceQueueStatus.running
+                      ? `\u{1F50D} Checking Compliances... ${billComplianceQueueStatus.percent}% (${billComplianceQueueStatus.processed}/${billComplianceQueueStatus.total})`
+                      : billComplianceQueueStatus.stoppedReason
+                        ? `\u26A0 Partial — ${billComplianceQueueStatus.stoppedReason === 'quota_exceeded' ? 'AI quota limit reached' : 'time limit reached'} (${billComplianceQueueStatus.processed}/${billComplianceQueueStatus.total} done)`
+                        : `Checked Compliances \u2714\uFE0F`}
+                  </button>
+                )}
+                {tab==='pmos' && (
+                  <button disabled style={{background: pmoComplianceQueueStatus.running ? '#eff6ff' : (pmoComplianceQueueStatus.stoppedReason ? '#fff7ed' : '#f0fdf4'), color: pmoComplianceQueueStatus.running ? '#1d4ed8' : (pmoComplianceQueueStatus.stoppedReason ? '#c2410c' : '#15803d'), border:'1px solid ' + (pmoComplianceQueueStatus.running ? '#bfdbfe' : (pmoComplianceQueueStatus.stoppedReason ? '#fed7aa' : '#bbf7d0')), borderRadius:7, padding:'5px 11px', fontSize:12, fontWeight:600, whiteSpace:'nowrap', cursor:'default', opacity:1}}>
+                    {pmoComplianceQueueStatus.running
+                      ? `\u{1F50D} Checking Compliances... ${pmoComplianceQueueStatus.percent}% (${pmoComplianceQueueStatus.processed}/${pmoComplianceQueueStatus.total})`
+                      : pmoComplianceQueueStatus.stoppedReason
+                        ? `\u26A0 Partial — ${pmoComplianceQueueStatus.stoppedReason === 'quota_exceeded' ? 'AI quota limit reached' : 'time limit reached'} (${pmoComplianceQueueStatus.processed}/${pmoComplianceQueueStatus.total} done)`
+                        : `Checked Compliances \u2714\uFE0F`}
+                  </button>
+                )}
+                <button onClick={function(){setSearch(tab==='bills'?'bill':tab==='pmos'?'pmo':'po');}} style={{background:'#f8fafc',color:'#475569',border:'1px solid #e2e8f0',borderRadius:7,padding:'5px 11px',cursor:'pointer',fontSize:12}}>Search</button>
                 <button onClick={function(){ if(tab==='pos') fetchPOs(true); else if(tab==='bills') fetchBills(true); else fetchPMOs(true); }} style={{background:'#f8fafc',color:'#475569',border:'1px solid #e2e8f0',borderRadius:7,padding:'5px 11px',cursor:'pointer',fontSize:12}}>{'\u{1F504} Refresh'}</button>
               </>
             )}
@@ -2484,13 +2800,19 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {selected && <DetailModal item={selected.item} type={selected.type} onClose={function(){setSelected(null);}}/>}
+      {selected && <DetailModal item={selected.item} type={selected.type} onClose={function(){setSelected(null);}}
+        onRecheckDone={function(){
+          if (selected.type==='po') fetchPOs(true);
+          else if (selected.type==='bill') fetchBills(true);
+          else fetchPMOs(true);
+        }}/>}
       {projDetail && <ProjectDetailModal proj={projDetail} parkNames={parkNames} onClose={function(){setProjDetail(null);}} onProjUpdated={fetchProjects}/>}
       {parkDetail && <ParkModal park={parkDetail} onClose={function(){setParkDetail(null);}} onProjectClick={function(p){setProjDetail(p);}} onParkUpdated={fetchProjects}/>}
       {pfbFlow && pfbFlow.step==='confirm' && <PFBVarConfirm proj={pfbFlow.proj} onClose={function(){setPFBFlow(null);}} onYes={onPFBYes} onNo={onPFBNo}/>}
       {pfbFlow && pfbFlow.step==='edit' && <PFBVarEdit proj={pfbFlow.proj} onClose={function(){setPFBFlow(null);}} onSave={onPFBSave}/>}
       {pfbFlow && pfbFlow.step==='show' && pfbFlow.pfbData && <PFBDisplay proj={pfbFlow.proj} data={pfbFlow.pfbData} onClose={function(){setPFBFlow(null);}}/>}
-      {showSearch && <SearchBox type={showSearch} onClose={function(){setSearch(null);}} onSelect={function(){setSearch(null);}}/>}
+      {showSearch && <SearchBox type={showSearch} onClose={function(){setSearch(null);}} onSelect={function(r){ setSearch(null); setSearchResult({ type: r.type, id: r.id }); }}/>}
+      {searchResult && <SearchResultModal type={searchResult.type} id={searchResult.id} onClose={function(){setSearchResult(null);}}/>}
       {showAddProj && <AddProjectModal onClose={function(){setShowAddProj(false);}} onSaved={fetchProjects} parkNames={parkNames}/>}
       {showAddPark && <AddParkModal onClose={function(){setShowAddPark(false);}} onSaved={fetchProjects}/>}
       {showUpdateRates && <UpdateRatesModal onClose={function(){setShowUpdateRates(false);}} onDone={fetchProjects}/>}

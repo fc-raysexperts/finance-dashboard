@@ -20,6 +20,8 @@ import { getPendingBills, getCachedPODetail, getPendingPOs } from '../../lib/zoh
 import { generatePFB, checkPOAlignment, nameSimilarity, compareValue, isSevere, isCaution } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runBillCompliance, getComplianceStatus } from '../../lib/checklistEngine';
+import { processAIQueueForBills } from '../../lib/aiComplianceEngine';
+const { buildFingerprint } = require('../../lib/aiComplianceEngine');
 import { buildReferenceRateRow } from '../../lib/referenceRates';
 const { storeGet, KEYS } = require('../../lib/store');
 
@@ -90,6 +92,30 @@ export default async function handler(req, res) {
     // Reference Rate data loaded ONCE per request, not per-Bill.
     const rrCatalog = await storeGet(KEYS.REFERENCE_RATE_CATALOG).catch(() => null) || {};
     const rrHistory = await storeGet(KEYS.REFERENCE_RATE_HISTORY).catch(() => null) || {};
+
+    // AI-judged compliance is BLOCKING here too, same design decision as
+    // POs: the tab must never show a Bill with "Pending AI review" unless
+    // AI genuinely couldn't finish (quota/time). Build a light linked-PO
+    // context map first (reusing the same findLinkedPO already defined in
+    // this file) purely to give the AI prompt useful context — the FULL,
+    // already-working PO-match/PFB logic below is untouched and does its
+    // own separate resolution, so this doesn't risk breaking anything.
+    const linkedPOMapForAI = {};
+    for (const bill of bills) {
+      try {
+        let ref = findLinkedPO(bill);
+        if (ref?._textMatched && !recentPONumbers.includes(ref.purchaseorder_number)) ref = null;
+        if (ref?.purchaseorder_id) {
+          linkedPOMapForAI[bill.bill_id] = await getCachedPODetail(ref.purchaseorder_id).catch(() => null);
+        }
+      } catch { /* best-effort context only, never block on this */ }
+    }
+
+    const aiQueueResult = await processAIQueueForBills(bills, linkedPOMapForAI, { timeBudgetMs: 260000 });
+    if (aiQueueResult.stoppedReason) {
+      console.warn(`AI queue stopped early for Bills: ${aiQueueResult.stoppedReason} (${aiQueueResult.processed}/${aiQueueResult.totalNeeded} completed)`);
+    }
+    const aiCache = (await storeGet(KEYS.AI_COMPLIANCE_CACHE)) || {};
 
     // 2. Enrich each bill in parallel
     const enriched = await Promise.all(bills.map(async bill => {
@@ -184,7 +210,11 @@ export default async function handler(req, res) {
         .map(li => buildReferenceRateRow(li, 'bill', rrCatalog, rrHistory, nameSimilarity, new Date().toISOString()))
         .filter(Boolean);
 
-      const compliance       = runBillCompliance(bill, linkedPO || linkedPORef, pfbTotal);
+      const aiCacheKeyBill    = `bill:${bill.bill_id || bill.bill_number}`;
+      const aiCacheEntryBill  = aiCache[aiCacheKeyBill];
+      const aiFingerprintBill = buildFingerprint(bill);
+      const aiResultsForThisBill = (aiCacheEntryBill && aiCacheEntryBill.fingerprint === aiFingerprintBill) ? aiCacheEntryBill.results : {};
+      const compliance       = await runBillCompliance(bill, linkedPO || linkedPORef, pfbTotal, aiResultsForThisBill);
       const complianceStatus = getComplianceStatus(compliance);
 
       // ── OVERALL ALIGNMENT STATUS — worst of poStatus and pfbStatus ──
@@ -301,6 +331,7 @@ export default async function handler(req, res) {
       success: true,
       count:   enriched.length,
       data:    enriched,
+      aiQueue: { completedFully: aiQueueResult.completedFully, processed: aiQueueResult.processed, totalNeeded: aiQueueResult.totalNeeded, stoppedReason: aiQueueResult.stoppedReason },
     });
 
   } catch (err) {
@@ -400,30 +431,31 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
     ['bill_basic', 'vendor_active', 'po_ref', 'gst_type', 'amount_calc', 'bill_no_po'].includes(c.id)
   );
 
-  if (compStatus === 'fail' || alignStatus === 'reject' || criticalFails.length > 0) {
+  // Recommendation is now driven ONLY by Compliance Check status — PFB
+  // Alignment already has its own dedicated table on this screen, so
+  // surfacing it a second time here (and letting it drive REJECT/FLAG)
+  // was redundant, and the PFB scope currently doesn't cover all items
+  // the firm actually uses, so it isn't reliable enough yet to gate a
+  // recommendation decision on its own. "No linked PO" is kept since
+  // that's a genuine compliance concern (bill_no_po check), independent
+  // of whether PFB alignment could be computed.
+  if (compStatus === 'fail' || criticalFails.length > 0) {
     return {
       decision: 'REJECT',
       color:    'red',
-      reasons: [
-        ...criticalFails.map(c => c.comment),
-        ...(alignStatus === 'reject' ? ['PFB budget exceeded — management approval required before payment'] : []),
-        ...(alignStatus === 'reject' && !linkedPO ? ['Bill has no linked PO'] : []),
-      ],
+      reasons: criticalFails.map(c => c.comment),
     };
   }
 
-  if (compStatus === 'warn' || alignStatus === 'flag') {
+  if (compStatus === 'warn') {
     return {
       decision: 'FLAG FOR REVIEW',
       color:    'amber',
-      reasons: [
-        ...failed.map(c => c.comment),
-        ...(alignStatus === 'flag' ? ['One or more items have rate/qty variance vs PO or PFB'] : []),
-      ],
+      reasons: failed.map(c => c.comment),
     };
   }
 
-  if (alignStatus === 'na' && !linkedPO) {
+  if (!linkedPO) {
     return {
       decision: 'FLAG FOR REVIEW',
       color:    'amber',
@@ -435,23 +467,12 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
     };
   }
 
-  if (alignStatus === 'na') {
-    return {
-      decision: compStatus === 'pass' ? 'APPROVE (No PFB Scope)' : 'FLAG FOR REVIEW',
-      color:    compStatus === 'pass' ? 'green' : 'amber',
-      reasons:  compStatus === 'pass'
-        ? ['All compliance checks passed', 'Items outside standard PFB scope — acceptable (e.g. services, freight, legal)']
-        : failed.map(c => c.comment),
-    };
-  }
-
   return {
     decision: 'APPROVE',
     color:    'green',
     reasons:  [
       'All bill compliance checks passed',
-      linkedPO ? `Amounts match PO ${linkedPO.number || linkedPO.purchaseorder_number || ''}` : '',
-      'PFB alignment confirmed',
+      `Amounts match PO ${linkedPO.number || linkedPO.purchaseorder_number || ''}`,
     ].filter(Boolean),
   };
 }

@@ -15,7 +15,7 @@ import { getAccessToken } from '../../lib/zohoToken';
 const axios = require('axios');
 
 export default async function handler(req, res) {
-  const { documentId } = req.query;
+  const { documentId, filename } = req.query;
   if (!documentId) {
     return res.status(400).send('Missing documentId');
   }
@@ -28,10 +28,39 @@ export default async function handler(req, res) {
       responseType: 'arraybuffer',
     });
 
-    const contentType = response.headers['content-type'] || 'application/pdf';
+    // Real bug: Zoho's /documents/{id} endpoint sometimes returns a
+    // content-type of application/octet-stream (or similar generic type)
+    // even when the underlying file genuinely is a PDF. Browsers refuse
+    // to render octet-stream inline in an <iframe> and force a download
+    // instead — which is exactly the "some PMOs download instead of
+    // preview" behavior. Since the vast majority of these attachments
+    // are PDFs, and Zoho's own content-disposition header name usually
+    // carries the real extension, sniff the magic bytes (PDF files
+    // always start with "%PDF-") and correct the content-type when it's
+    // actually a PDF but wasn't labeled as one.
+    const buf = Buffer.from(response.data);
+    const zohoContentType = response.headers['content-type'] || '';
+    const looksLikePDF = buf.slice(0, 5).toString('utf-8') === '%PDF-';
+    const contentType = looksLikePDF ? 'application/pdf' : (zohoContentType || 'application/octet-stream');
+
     res.setHeader('Content-Type', contentType);
+    // Real fix: include the actual filename so browsers use it for
+    // Save-As / downloads, instead of deriving a name from the URL
+    // itself (which always showed as "attachment-proxy"). Still
+    // "inline" disposition (so it previews in the iframe as before) —
+    // the filename is just metadata riding along with that, used only
+    // when the user explicitly saves/downloads the file. RFC 5987
+    // (filename*=UTF-8''...) handles special characters and non-ASCII
+    // names safely; the plain filename="" fallback covers older clients.
+    if (filename) {
+      const safeName = String(filename).replace(/[\r\n"]/g, '');
+      const encoded = encodeURIComponent(safeName);
+      res.setHeader('Content-Disposition', `inline; filename="${safeName.replace(/[^\x20-\x7E]/g, '_')}"; filename*=UTF-8''${encoded}`);
+    } else {
+      res.setHeader('Content-Disposition', 'inline');
+    }
     res.setHeader('Cache-Control', 'private, max-age=300');
-    res.status(200).send(Buffer.from(response.data));
+    res.status(200).send(buf);
   } catch (e) {
     const zohoErrorBody = e.response?.data ? Buffer.from(e.response.data).toString('utf-8').slice(0, 500) : null;
     res.status(500).send('Could not load attachment: ' + (e.response?.status || e.message) + (zohoErrorBody ? ' | Zoho said: ' + zohoErrorBody : ''));
