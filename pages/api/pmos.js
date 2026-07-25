@@ -221,6 +221,36 @@ export default async function handler(req, res) {
     const jatinPMOs = detailed;
     console.log(`PMOs: ${jatinPMOs.length} currently pending Jatin's approval`);
 
+    // Real, confirmed (though undocumented) endpoint for a PMO's native
+    // "Supporting Attachments" — found by inspecting Zoho Books' own web
+    // UI network requests directly, since this isn't in their public API
+    // docs at all (confirmed via docs.zoho.com — custom modules only
+    // document Create/List/Update/Delete for module+records, nothing for
+    // attachments). Fetched ONCE per PMO here and shared across both the
+    // AI pre-pass and the full display enrichment below, so this doesn't
+    // double the number of real API calls.
+    async function fetchPMOSupportingAttachments(pmoRecordId) {
+      try {
+        const data = await zohoGET(`/${PMO_MODULE}/${pmoRecordId}/attachment`);
+        // Structure not documented anywhere — logging the raw shape on
+        // first real use so we can confirm/correct field names below.
+        const list = data.documents || data.attachments || data.data || (Array.isArray(data) ? data : []);
+        return list.map(d => ({
+          document_id: d.document_id || d.attachment_id || d.file_id || d.id,
+          file_name:   d.file_name || d.attachment_name || d.name || 'Supporting Attachment',
+        })).filter(d => d.document_id);
+      } catch (e) {
+        console.error(`Could not fetch Supporting Attachments for PMO ${pmoRecordId}:`, e.message);
+        return [];
+      }
+    }
+    const supportingDocsMap = {};
+    await Promise.all(jatinPMOs.map(async raw => {
+      supportingDocsMap[raw.module_record_id] = await fetchPMOSupportingAttachments(raw.module_record_id);
+    }));
+    console.log(`[PMO Supporting Attachments] raw response shape (first PMO with any): ${JSON.stringify(Object.entries(supportingDocsMap).find(([,v]) => v.length > 0) || 'none found')}`);
+    console.log(`[PMO Supporting Attachments] counts: ${jatinPMOs.map(raw => `${raw.record_name || raw.module_record_id}:${(supportingDocsMap[raw.module_record_id]||[]).length}`).join(', ')}`);
+
     // AI-judged compliance (only material_status needs this) — same
     // blocking design as POs/Bills: never show an un-checked advance PMO.
     // Real bug fixed here: the AI batch was previously given the RAW,
@@ -234,14 +264,13 @@ export default async function handler(req, res) {
     // uses (kept minimal and separate from that fuller logic to avoid
     // risking any of its already-working behavior), so the AI batch
     // operates on correctly-shaped objects with a stable identity.
-    // Real bug fixed here (found via diagnostic logging): PMOs don't
-    // have a "documents" array like PO/Bill at all — raw.documents was
-    // ALWAYS empty by definition, not a timing issue. PMOs store at most
-    // ONE attachment, via the single custom field cf_attachment /
-    // cf_attachment_formatted (confirmed from the real field usage
-    // elsewhere in this file: attachmentId/attachmentName). Wrapping
-    // that single reference as a 1-item array to match the shape the
-    // rest of the AI pipeline (shared with PO/Bill) expects.
+    // A PMO actually has TWO separate attachment sources in Zoho,
+    // confirmed via a real example (PM/RAYS/26-27/1411): the custom
+    // field cf_attachment (always present — the "PI/Bill Attachment")
+    // AND Zoho's native document-attachment feature, fetched above via
+    // the confirmed real endpoint (optional "Supporting Attachments",
+    // e.g. bank details, material spec sheets). Both need to reach the
+    // AI in one call.
     function extractPMOKeyFieldsForAI(raw) {
       const f = extractFields(raw.module_fields);
       const payCategory = String(f.cf_payment_category    || '');
@@ -249,6 +278,8 @@ export default async function handler(req, res) {
       const payType     = String(f.cf_payment_type         || '');
       const attachmentId   = String(f.cf_attachment           || '');
       const attachmentName = String(f.cf_attachment_formatted || '');
+      const piBillDoc = attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'PI/Bill Attachment' }] : [];
+      const supportingDocs = supportingDocsMap[raw.module_record_id] || [];
       return {
         pmo_number:     String(f.cf_pmo_number || raw.record_name || ''),
         id:             raw.module_record_id,
@@ -257,12 +288,12 @@ export default async function handler(req, res) {
         remarks:        String(f.cf_remarks || ''),
         paymentDetails: String(f.cf_payment_details || ''),
         payment_type:   [payCategory, paySubCat, payType].filter(Boolean).join(' / '),
-        documents:      attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'attachment' }] : [],
+        documents:      [...piBillDoc, ...supportingDocs], // AI sees all of them together, in one call
         approvers_list: raw.approvers_list || [],
       };
     }
     const pmoNormListForAI = jatinPMOs.map(extractPMOKeyFieldsForAI);
-    console.log(`[AI PMO pre-pass] doc counts: ${pmoNormListForAI.map(p => `${p.pmo_number}:${(p.documents||[]).length}`).join(', ')}`);
+    console.log(`[AI PMO pre-pass] doc counts (PI/Bill + Supporting = total): ${pmoNormListForAI.map(p => `${p.pmo_number}:${(p.documents||[]).length}`).join(', ')}`);
 
     console.time('[TIMING] processAIQueueForPMOs');
     const aiQueueResult = await processAIQueueForPMOs(pmoNormListForAI, { timeBudgetMs: 260000 });
@@ -302,6 +333,11 @@ export default async function handler(req, res) {
       const closingBal   = parseFloat(f.cf_closing_balance) || 0;
       const attachmentId = String(f.cf_attachment           || '');
       const attachmentName = String(f.cf_attachment_formatted || '');
+      // Real second attachment source, confirmed via PM/RAYS/26-27/1411:
+      // a PMO can ALSO have Supporting Attachments — separate from the
+      // always-present PI/Bill Attachment above — via Zoho's native
+      // document-attachment feature, fetched above via the confirmed real endpoint.
+      const supportingDocs = supportingDocsMap[raw.module_record_id] || [];
 
       // Amt vs Bill/PO/Invoice/Expense and the PO Breakup table — exact
       // custom-field names for these can't be confirmed from outside this
@@ -388,7 +424,10 @@ export default async function handler(req, res) {
         remarks,
         paymentDetails,
         payment_type:      payTypeLabel,
-        documents:         attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'attachment' }] : [],
+        documents:         [
+          ...(attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'PI/Bill Attachment' }] : []),
+          ...supportingDocs,
+        ],
         submitted_by_name: raw.submitted_by_name || '',
         closing_balance:   closingBal,
         approvers_list:    raw.approvers_list || [],
@@ -430,7 +469,13 @@ export default async function handler(req, res) {
         submittedBy:     raw.submitted_by_name || '',
         submittedDate:   raw.submitted_date    || '',
         status:          raw.status,
-        docs:            attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'attachment' }] : [],
+        // Two real, distinct categories (confirmed via PM/RAYS/26-27/1411):
+        piBillDocs:    attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'PI/Bill Attachment' }] : [],
+        supportingDocs: supportingDocs,
+        docs:            [
+          ...(attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'PI/Bill Attachment' }] : []),
+          ...supportingDocs,
+        ], // combined — kept for the pmo_docs "Supporting Documents" check and anything else expecting one flat list
         lineItems:       [],
         complianceStatus: compStatus,
         alignmentStatus:  alignment.status,
@@ -462,8 +507,15 @@ export default async function handler(req, res) {
 }
 
 function buildRec(status, checks) {
-  const failed = checks.filter(c => !c.passed);
-  if (status === 'fail') return { decision:'REJECT',          color:'red',   reasons: failed.map(c => c.comment) };
-  if (status === 'warn') return { decision:'FLAG FOR REVIEW', color:'amber', reasons: failed.map(c => c.comment) };
+  // Real fix: was `!c.passed`, which would silently exclude the new
+  // 'no-evidence' state (a truthy string) from Recommendation reasons.
+  const isConcern = c => c.passed !== true && c.passed !== 'uncertain';
+  const failed = checks.filter(isConcern);
+  // Real bug fixed: several checks can genuinely share the exact same
+  // comment (e.g. both AI checks on a PMO with zero attachments both say
+  // "No attachment is present...") — dedupe before listing as reasons.
+  const dedupe = (arr) => [...new Set(arr)];
+  if (status === 'fail') return { decision:'REJECT',          color:'red',   reasons: dedupe(failed.map(c => c.comment)) };
+  if (status === 'warn') return { decision:'FLAG FOR REVIEW', color:'amber', reasons: dedupe(failed.map(c => c.comment)) };
   return { decision:'APPROVE', color:'green', reasons: ['All PMO compliance checks passed'] };
 }

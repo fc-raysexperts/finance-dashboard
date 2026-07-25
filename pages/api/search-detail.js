@@ -111,6 +111,16 @@ export default async function handler(req, res) {
       const attachmentName = String(f.cf_attachment_formatted || '');
       const expenseRows = Array.isArray(recordHash.cf_cm_expense_breakup_1) ? recordHash.cf_cm_expense_breakup_1 : [];
       const poRows      = Array.isArray(recordHash.cf_cm_po_breakup_1) ? recordHash.cf_cm_po_breakup_1 : [];
+      // Real, confirmed (undocumented) endpoint for Supporting Attachments.
+      let supportingDocs = [];
+      try {
+        const attData = await zohoGET(`/${PMO_MODULE}/${id}/attachment`);
+        const list = attData.documents || attData.attachments || attData.data || (Array.isArray(attData) ? attData : []);
+        supportingDocs = list.map(d => ({
+          document_id: d.document_id || d.attachment_id || d.file_id || d.id,
+          file_name:   d.file_name || d.attachment_name || d.name || 'Supporting Attachment',
+        })).filter(d => d.document_id);
+      } catch (e) { /* best-effort — Supporting Attachments simply won't show if this fails */ }
       return res.status(200).json({ success: true, data: {
         type: 'pmo',
         sectionA: [
@@ -135,7 +145,10 @@ export default async function handler(req, res) {
           name: r.cf_expense_detail || 'Expense', quantity: 1, rate: r.cf_basic_amount, item_total: r.cf_total,
         })),
         subTotal: null, total: parseFloat(f.cf_payable_amount) || 0,
-        docs: attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'attachment' }] : [],
+        docs: [
+          ...(attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'PI/Bill Attachment' }] : []),
+          ...supportingDocs,
+        ],
       }});
     }
 

@@ -303,13 +303,27 @@ function CompTable({ checks, title, pbpType, pbpId, onRecheckDone }) {
           //                  check was possible (e.g. no GSTR-2B document
           //                  was available to verify against, so only
           //                  GSTIN format validity could be checked)
+          // Four real states now:
+          //   true       -> ✅ genuinely confirmed
+          //   false      -> ❌ genuinely failed/missing
+          //   null       -> ⏳ pending — hasn't been analyzed yet at all, will resolve on its own
+          //   'uncertain'-> ❔ analyzed, but only a narrower/fallback
+          //                  check was possible (e.g. no GSTR-2B document
+          //                  was available to verify against, so only
+          //                  GSTIN format validity could be checked)
+          //   'no-evidence' -> 🚫 analyzed, but there's genuinely no
+          //                  attachment to verify against — distinct from
+          //                  'pending' since this will NEVER resolve just
+          //                  by waiting; needs a document to be uploaded first
           const icon = c.passed === true ? '\u2705'
             : c.passed === false ? '\u274C'
             : c.passed === 'uncertain' ? '\u2754'
+            : c.passed === 'no-evidence' ? '\u{1F6AB}'
             : '\u23F3';
           const textColor = c.passed === true ? '#15803d'
             : c.passed === false ? '#dc2626'
             : c.passed === 'uncertain' ? '#a16207'
+            : c.passed === 'no-evidence' ? '#64748b'
             : '#0369a1';
           return <CompRow key={i} c={c} icon={icon} textColor={textColor} isLast={i===checks.length-1} zebra={i%2?'#f8fafc':'#fff'}/>;
         })}
@@ -1661,11 +1675,11 @@ function ItemDetailsTable({ items }) {
 }
 
 // ----- ATTACHMENTS -----
-function Attachments({ docs, onPreview }) {
+function Attachments({ docs, onPreview, title }) {
   if (!docs || !docs.length) return <div style={{color:'#94a3b8',fontSize:12,marginBottom:16}}>{'\u{1F4CE}'} No attachments</div>;
   return (
     <div style={{marginBottom:16}}>
-      <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:8}}>{'Attachments (' + docs.length + ')'}</h3>
+      <h3 style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:8}}>{title || ('Attachments (' + docs.length + ')')}</h3>
       <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
         {docs.map(function(d,i){
           const name = d.file_name || d.fileName || ('Document ' + (i+1));
@@ -1914,15 +1928,15 @@ function DetailModal({ item, type, onClose, onRecheckDone }) {
       {!isPMO && <ReferenceRateTable checks={item.referenceRateChecks}/>}
       {isPMO && item.alignment && item.alignment.checks && item.alignment.checks.length>0 && <CompTable checks={item.alignment.checks} title="PI / Bill Alignment"/>}
       {isPMO ? (
-        item.attachmentId
-          ? <div style={{marginBottom:16}}>
-              <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>Attachments (1)</h3>
-              <button onClick={function(){ setAttachmentPreview({name: item.attachmentName || 'PI/Bill attachment', documentId: item.attachmentId}); }}
-                style={{display:'inline-flex',alignItems:'center',gap:6,background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'5px 10px',fontSize:13,fontWeight:500,cursor:'pointer'}}>
-                {'\u{1F4CE} ' + (item.attachmentName || 'PI/Bill — ref ' + item.attachmentId)}
-              </button>
+        <>
+          <Attachments docs={item.piBillDocs && item.piBillDocs.length > 0 ? item.piBillDocs : null} onPreview={setAttachmentPreview} title="PI/Bill Attachment"/>
+          {item.supportingDocs && item.supportingDocs.length > 0 && (
+            <div style={{marginTop:-8}}>
+              <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>Supporting Attachments ({item.supportingDocs.length})</h3>
+              <Attachments docs={item.supportingDocs} onPreview={setAttachmentPreview}/>
             </div>
-          : <Attachments docs={null}/>
+          )}
+        </>
       ) : (
         <Attachments docs={item.attachments || item.docs || item.documents} onPreview={setAttachmentPreview}/>
       )}

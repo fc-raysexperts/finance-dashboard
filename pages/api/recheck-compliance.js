@@ -79,6 +79,16 @@ export default async function handler(req, res) {
       const payType     = String(f.cf_payment_type || '');
       const attachmentId   = String(f.cf_attachment           || '');
       const attachmentName = String(f.cf_attachment_formatted || '');
+      // Real, confirmed (undocumented) endpoint for Supporting Attachments.
+      let supportingDocs = [];
+      try {
+        const attData = await zohoGET(`/${PMO_MODULE}/${id}/attachment`);
+        const list = attData.documents || attData.attachments || attData.data || (Array.isArray(attData) ? attData : []);
+        supportingDocs = list.map(d => ({
+          document_id: d.document_id || d.attachment_id || d.file_id || d.id,
+          file_name:   d.file_name || d.attachment_name || d.name || 'Supporting Attachment',
+        })).filter(d => d.document_id);
+      } catch (e) { /* best-effort */ }
       const pmo = {
         pmo_number:     String(f.cf_pmo_number || record.record_name || ''),
         id:             record.module_record_id,
@@ -87,7 +97,10 @@ export default async function handler(req, res) {
         remarks:        String(f.cf_remarks || ''),
         paymentDetails: String(f.cf_payment_details || ''),
         payment_type:   [payCategory, paySubCat, payType].filter(Boolean).join(' / '),
-        documents:      attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'attachment' }] : [],
+        documents:      [
+          ...(attachmentId ? [{ document_id: attachmentId, file_name: attachmentName || 'PI/Bill Attachment' }] : []),
+          ...supportingDocs,
+        ],
         approvers_list: [],
       };
       const result = await getAIComplianceForPMO(pmo);

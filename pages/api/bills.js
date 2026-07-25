@@ -425,7 +425,16 @@ function checkBillAgainstPO(billItems, poItems) {
 // FINAL RECOMMENDATION — based on both compliance and alignment statuses
 // ─────────────────────────────────────────────────────────────
 function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
-  const failed = compliance.filter(c => !c.passed);
+  // Real fix: was `!c.passed`, which would silently exclude the new
+  // 'no-evidence' state (a truthy string) from Recommendation reasons.
+  const isConcern = c => c.passed !== true && c.passed !== 'uncertain';
+  const failed = compliance.filter(isConcern);
+  // Real bug fixed: several checks can genuinely share the exact same
+  // comment (e.g. multiple AI-pending checks on a bill with zero
+  // attachments all say "No attachment is present...") — without
+  // deduping, the Recommendation section would list that identical line
+  // once per check instead of once total.
+  const dedupe = (arr) => [...new Set(arr)];
 
   const criticalFails = failed.filter(c =>
     ['bill_basic', 'vendor_active', 'po_ref', 'gst_type', 'amount_calc', 'bill_no_po'].includes(c.id)
@@ -443,7 +452,7 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
     return {
       decision: 'REJECT',
       color:    'red',
-      reasons: criticalFails.map(c => c.comment),
+      reasons: dedupe(criticalFails.map(c => c.comment)),
     };
   }
 
@@ -451,7 +460,7 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
     return {
       decision: 'FLAG FOR REVIEW',
       color:    'amber',
-      reasons: failed.map(c => c.comment),
+      reasons: dedupe(failed.map(c => c.comment)),
     };
   }
 
@@ -459,11 +468,11 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
     return {
       decision: 'FLAG FOR REVIEW',
       color:    'amber',
-      reasons: [
+      reasons: dedupe([
         'No PO linked to this bill',
         'Bills without PO require management approval + RP Sir sign-off',
         ...failed.map(c => c.comment),
-      ],
+      ]),
     };
   }
 

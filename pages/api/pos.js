@@ -260,7 +260,20 @@ export default async function handler(req, res) {
 }
 
 function buildRecommendation(compStatus, alignStatus, compliance) {
-  const critFails = compliance.filter(c => !c.passed && ['po_basic','vendor_details','gst_type','ld_clause'].includes(c.id));
+  // Real fix: was `!c.passed`, which correctly caught false/null but
+  // would silently exclude the new 'no-evidence' state (a truthy
+  // string) — meaning "this can't be verified, no attachment exists"
+  // would vanish from the Recommendation reasons entirely. This
+  // predicate explicitly catches everything that ISN'T a genuine pass
+  // or the deliberately-softer 'uncertain' state.
+  const isConcern = c => c.passed !== true && c.passed !== 'uncertain';
+  const critFails = compliance.filter(c => isConcern(c) && ['po_basic','vendor_details','gst_type','ld_clause'].includes(c.id));
+  // Real bug fixed: several checks can genuinely share the exact same
+  // comment (e.g. multiple AI-pending checks on a PO with zero
+  // attachments all say "No attachment is present...") — without
+  // deduping, the Recommendation section would list that identical line
+  // once per check instead of once total.
+  const dedupe = (arr) => [...new Set(arr)];
 
   // Recommendation is now driven ONLY by Compliance Check status —
   // PFB Alignment already has its own dedicated table on this screen,
@@ -272,14 +285,14 @@ function buildRecommendation(compStatus, alignStatus, compliance) {
     return {
       decision: 'REJECT',
       color: 'red',
-      reasons: critFails.map(c => c.comment),
+      reasons: dedupe(critFails.map(c => c.comment)),
     };
   }
   if (compStatus === 'warn') {
     return {
       decision: 'FLAG FOR REVIEW',
       color: 'amber',
-      reasons: compliance.filter(c=>!c.passed).map(c=>c.comment),
+      reasons: dedupe(compliance.filter(isConcern).map(c=>c.comment)),
     };
   }
   return {
