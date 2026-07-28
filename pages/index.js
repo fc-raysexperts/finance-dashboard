@@ -2378,6 +2378,20 @@ export default function Dashboard() {
   // was never actually seen, just an instant jump to "Checked
   // Compliances". Self-rescheduling (setTimeout, not setInterval) lets
   // the delay change dynamically based on the last response.
+  // Real UX fix: previously, if enough NEW items needed real AI
+  // compliance checks that they couldn't all finish within one request's
+  // time budget (Gemini's pacing alone can take over a minute for a
+  // dozen new items), the user had to notice the "Checking..." status
+  // and manually click Refresh a second time once it looked done. These
+  // 3 refs track each tab's own "was the AI queue running last time I
+  // checked" state, purely to detect the exact moment it FINISHES —
+  // triggering one single, ordinary (fast, cache-hit) re-fetch of that
+  // tab's own list automatically, so the full, complete result appears
+  // on its own without any further clicks.
+  const poQueueWasRunningRef  = useRef(false);
+  const billQueueWasRunningRef = useRef(false);
+  const pmoQueueWasRunningRef = useRef(false);
+
   useEffect(function(){
     let cancelled = false;
     let timer = null;
@@ -2387,6 +2401,8 @@ export default function Dashboard() {
         const d = await r.json();
         if (cancelled) return;
         setComplianceQueueStatus(d);
+        if (poQueueWasRunningRef.current && !d.running) fetchPOs(false);
+        poQueueWasRunningRef.current = !!d.running;
         timer = setTimeout(poll, d.running ? 5000 : 60000);
       } catch (e) {
         if (!cancelled) timer = setTimeout(poll, 60000);
@@ -2406,6 +2422,8 @@ export default function Dashboard() {
         const d = await r.json();
         if (cancelled) return;
         setBillComplianceQueueStatus(d);
+        if (billQueueWasRunningRef.current && !d.running) fetchBills(false);
+        billQueueWasRunningRef.current = !!d.running;
         timer = setTimeout(poll, d.running ? 5000 : 60000);
       } catch (e) {
         if (!cancelled) timer = setTimeout(poll, 60000);
@@ -2425,6 +2443,8 @@ export default function Dashboard() {
         const d = await r.json();
         if (cancelled) return;
         setPmoComplianceQueueStatus(d);
+        if (pmoQueueWasRunningRef.current && !d.running) fetchPMOs(false);
+        pmoQueueWasRunningRef.current = !!d.running;
         timer = setTimeout(poll, d.running ? 5000 : 60000);
       } catch (e) {
         if (!cancelled) timer = setTimeout(poll, 60000);
@@ -2433,6 +2453,7 @@ export default function Dashboard() {
     poll();
     return function(){ cancelled = true; if (timer) clearTimeout(timer); };
   }, [selectedOrg]);
+
 
   const sortByDate = function(arr, field) {
     return arr.slice().sort(function(a,b){
