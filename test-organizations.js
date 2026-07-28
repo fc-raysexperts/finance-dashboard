@@ -14,6 +14,15 @@
 // Delete this file afterward — it's just a throwaway diagnostic, not
 // part of the actual dashboard.
 
+// Real fix: a standalone `node script.js` run does NOT automatically
+// load .env.local the way Next.js's own dev server does — that
+// automatic loading is a Next.js-specific behavior, not a general
+// Node.js one. Without this, ZOHO_CLIENT_ID/SECRET/REFRESH_TOKEN were
+// all blank, which is exactly why Zoho returned "invalid_client" — it
+// correctly rejected an empty/missing client. Loading it explicitly
+// here fixes that (dotenv is already a project dependency).
+require('dotenv').config({ path: '.env.local' });
+
 const axios = require('axios');
 const { getAccessToken } = require('./lib/zohoToken');
 

@@ -12,19 +12,21 @@
 // own unique ID, not the parent record's ID.
 
 import { getAccessToken } from '../../lib/zohoToken';
+import { getOrgId } from '../../lib/subsidiaries';
 const axios = require('axios');
 
 export default async function handler(req, res) {
-  const { documentId, filename } = req.query;
+  const { documentId, filename, org } = req.query;
   if (!documentId) {
     return res.status(400).send('Missing documentId');
   }
+  const orgKey = org || 'rays';
 
   try {
     const token = await getAccessToken();
     const response = await axios.get(`https://www.zohoapis.in/books/v3/documents/${documentId}`, {
       headers: { Authorization: `Zoho-oauthtoken ${token}` },
-      params: { organization_id: process.env.ZOHO_ORG_ID },
+      params: { organization_id: getOrgId(orgKey) },
       responseType: 'arraybuffer',
     });
 

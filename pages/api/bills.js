@@ -23,7 +23,7 @@ import { runBillCompliance, getComplianceStatus } from '../../lib/checklistEngin
 import { processAIQueueForBills } from '../../lib/aiComplianceEngine';
 const { buildFingerprint } = require('../../lib/aiComplianceEngine');
 import { buildReferenceRateRow } from '../../lib/referenceRates';
-const { storeGet, KEYS } = require('../../lib/store');
+const { storeGet, KEYS, orgScopedKey } = require('../../lib/store');
 
 // Items that legitimately have no PO — used so the "no reference" message
 // doesn't read as an error for these
@@ -65,6 +65,11 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Real subsidiary selection — same convention as pos.js (Phase 2),
+    // defaults to 'rays' for full backward compatibility until the
+    // frontend dropdown (Phase 6) actually sends this.
+    const orgKey = req.query.org || 'rays';
+
     const userProjects = (await storeGet(KEYS.USER_PROJECTS)) || [];
     const zohoNameOvr   = (await storeGet(KEYS.ZOHO_NAME_OVR)) || {};
     const allProjects = [...PROJECTS, ...userProjects].map(p => ({
@@ -76,8 +81,8 @@ export default async function handler(req, res) {
     // clicked Refresh; a normal page load serves from the persisted cache
     // with zero Zoho calls.
     const forceRefresh = req.query.refresh === '1';
-    const bills = await getPendingBills(forceRefresh);
-    console.log(`bills: ${bills.length} currently pending Jatin's approval`);
+    const bills = await getPendingBills(forceRefresh, orgKey);
+    console.log(`[${orgKey}] bills: ${bills.length} currently pending Jatin's approval`);
 
     // Recent PO numbers, for verifying a text-matched reference is real —
     // always cache-only here regardless of the Bills refresh, since this
@@ -85,13 +90,15 @@ export default async function handler(req, res) {
     // refresh as a side effect of refreshing Bills.
     let recentPONumbers = [];
     try {
-      const pos = await getPendingPOs();
+      const pos = await getPendingPOs(undefined, orgKey);
       recentPONumbers = pos.map(p => p.purchaseorder_number);
     } catch {}
 
-    // Reference Rate data loaded ONCE per request, not per-Bill.
-    const rrCatalog = await storeGet(KEYS.REFERENCE_RATE_CATALOG).catch(() => null) || {};
-    const rrHistory = await storeGet(KEYS.REFERENCE_RATE_HISTORY).catch(() => null) || {};
+    // Reference Rate data loaded ONCE per request, not per-Bill. Deferred
+    // for the 3 new subsidiaries (no historical data yet) — cache keys
+    // are still org-scoped here for correctness/future-proofing.
+    const rrCatalog = await storeGet(orgScopedKey(KEYS.REFERENCE_RATE_CATALOG, orgKey)).catch(() => null) || {};
+    const rrHistory = await storeGet(orgScopedKey(KEYS.REFERENCE_RATE_HISTORY, orgKey)).catch(() => null) || {};
 
     // AI-judged compliance is BLOCKING here too, same design decision as
     // POs: the tab must never show a Bill with "Pending AI review" unless
@@ -106,16 +113,22 @@ export default async function handler(req, res) {
         let ref = findLinkedPO(bill);
         if (ref?._textMatched && !recentPONumbers.includes(ref.purchaseorder_number)) ref = null;
         if (ref?.purchaseorder_id) {
-          linkedPOMapForAI[bill.bill_id] = await getCachedPODetail(ref.purchaseorder_id).catch(() => null);
+          linkedPOMapForAI[bill.bill_id] = await getCachedPODetail(ref.purchaseorder_id, orgKey).catch(() => null);
         }
       } catch { /* best-effort context only, never block on this */ }
     }
 
-    const aiQueueResult = await processAIQueueForBills(bills, linkedPOMapForAI, { timeBudgetMs: 260000 });
+    // NOTE: processAIQueueForBills doesn't yet consume orgKey (that's
+    // Phase 3, lib/aiComplianceEngine.js) — passed forward here so
+    // bills.js won't need touching again once that phase lands. Until
+    // then, this will operate on Rays' Gemini cache/key regardless of
+    // which subsidiary is actually selected — a known, temporary
+    // limitation of this specific phase.
+    const aiQueueResult = await processAIQueueForBills(bills, linkedPOMapForAI, { timeBudgetMs: 260000 }, orgKey);
     if (aiQueueResult.stoppedReason) {
-      console.warn(`AI queue stopped early for Bills: ${aiQueueResult.stoppedReason} (${aiQueueResult.processed}/${aiQueueResult.totalNeeded} completed)`);
+      console.warn(`[${orgKey}] AI queue stopped early for Bills: ${aiQueueResult.stoppedReason} (${aiQueueResult.processed}/${aiQueueResult.totalNeeded} completed)`);
     }
-    const aiCache = (await storeGet(KEYS.AI_COMPLIANCE_CACHE)) || {};
+    const aiCache = (await storeGet(orgScopedKey(KEYS.AI_COMPLIANCE_CACHE, orgKey))) || {};
 
     // 2. Enrich each bill in parallel
     const enriched = await Promise.all(bills.map(async bill => {
@@ -156,7 +169,7 @@ export default async function handler(req, res) {
       }
       let linkedPO = null;
       if (linkedPORef?.purchaseorder_id) {
-        try { linkedPO = await getCachedPODetail(linkedPORef.purchaseorder_id); } catch { linkedPO = null; }
+        try { linkedPO = await getCachedPODetail(linkedPORef.purchaseorder_id, orgKey); } catch { linkedPO = null; }
       }
       const noPOExpected = !linkedPORef && isExpectedNoPOItem(lineItems);
 

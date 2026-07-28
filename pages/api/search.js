@@ -2,15 +2,19 @@
 // Search POs, Bills, or PMOs by any keyword
 
 import { searchPOs, searchBills } from '../../lib/zoho';
+import { getOrgId, getPMOModuleName } from '../../lib/subsidiaries';
 const axios = require('axios');
 const { getAccessToken } = require('../../lib/zohoToken');
 
-const PMO_MODULE = 'cm_payment_memos';
-async function searchPMOs(query) {
+async function searchPMOs(query, orgKey = 'rays') {
   let token = await getAccessToken();
+  // Real bug fixed: PMO module API name genuinely differs per
+  // organization (confirmed via live diagnostic) — Rays uses the plural
+  // form, Energy/OM use the singular form.
+  const PMO_MODULE = getPMOModuleName(orgKey);
   const res = await axios.get(`https://www.zohoapis.in/books/v3/${PMO_MODULE}`, {
     headers: { Authorization: `Zoho-oauthtoken ${token}` },
-    params: { organization_id: process.env.ZOHO_ORG_ID, search_text: query, per_page: 50 },
+    params: { organization_id: getOrgId(orgKey), search_text: query, per_page: 50 },
   });
   return res.data.module_records || [];
 }
@@ -20,7 +24,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { q, type } = req.query;
+  const { q, type, org } = req.query;
+  const orgKey = org || 'rays';
 
   if (!q || q.trim().length < 2) {
     return res.status(400).json({ error: 'Search query must be at least 2 characters' });
@@ -30,7 +35,7 @@ export default async function handler(req, res) {
     let results = [];
 
     if (type === 'bill') {
-      const bills = await searchBills(q.trim());
+      const bills = await searchBills(q.trim(), orgKey);
       results = bills.map(b => ({
         id:         b.bill_id,
         number:     b.bill_number,
@@ -48,7 +53,7 @@ export default async function handler(req, res) {
       // independently verified against live data. If this comes back
       // empty even for a PMO number you know exists, that's the first
       // thing to check.
-      const pmos = await searchPMOs(q.trim());
+      const pmos = await searchPMOs(q.trim(), orgKey);
       results = pmos.map(p => ({
         id:      p.module_record_id,
         number:  String(p.record_name || ''),
@@ -61,7 +66,7 @@ export default async function handler(req, res) {
       }));
     } else {
       // Default: search POs
-      const pos = await searchPOs(q.trim());
+      const pos = await searchPOs(q.trim(), orgKey);
       results = pos.map(p => ({
         id:         p.purchaseorder_id,
         number:     p.purchaseorder_number,

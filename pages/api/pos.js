@@ -18,12 +18,24 @@ import { runPOCompliance, getComplianceStatus } from '../../lib/checklistEngine'
 import { getAdvancePaidByPO } from '../../lib/advanceReconcile';
 const { buildFingerprint, processAIQueueForPOs } = require('../../lib/aiComplianceEngine');
 import { buildReferenceRateRow } from '../../lib/referenceRates';
-const { storeGet, KEYS } = require('../../lib/store');
+const { storeGet, KEYS, orgScopedKey } = require('../../lib/store');
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
+    // Real subsidiary selection — defaults to 'rays' so this route keeps
+    // working exactly as before for every existing call that doesn't
+    // send this param yet (i.e. until the frontend's dropdown, Phase 6,
+    // is built). getPendingPOs/getCachedPODetail etc. (lib/zoho.js) are
+    // already fully org-aware as of Phase 1. NOTE: processAIQueueForPOs
+    // and getAdvancePaidByPO are passed orgKey here too, forward-
+    // compatible with Phases 3/4 — until those land, they'll simply
+    // ignore this extra argument and continue operating on Rays' data
+    // only, regardless of which subsidiary was actually requested. That
+    // is a known, temporary limitation of this specific phase, not a bug.
+    const orgKey = req.query.org || 'rays';
+
     const userProjects = (await storeGet(KEYS.USER_PROJECTS)) || [];
     const zohoNameOvr   = (await storeGet(KEYS.ZOHO_NAME_OVR)) || {};
     const allProjects = [...PROJECTS, ...userProjects].map(p => ({
@@ -37,18 +49,21 @@ export default async function handler(req, res) {
     // from the persisted cache with zero Zoho calls.
     const forceRefresh = req.query.refresh === '1';
     console.time('[TIMING] getPendingPOs');
-    const pos = await getPendingPOs(forceRefresh);
+    const pos = await getPendingPOs(forceRefresh, orgKey);
     console.timeEnd('[TIMING] getPendingPOs');
-    console.log(`pos: ${pos.length} currently pending Jatin's approval`);
+    console.log(`[${orgKey}] pos: ${pos.length} currently pending Jatin's approval`);
 
-    // Reference Rate data loaded ONCE per request, not per-PO - shared
-    // across every PO in this response.
-    const rrCatalog = await storeGet(KEYS.REFERENCE_RATE_CATALOG).catch(() => null) || {};
-    const rrHistory = await storeGet(KEYS.REFERENCE_RATE_HISTORY).catch(() => null) || {};
+    // Reference Rate is deliberately deferred for now (no historical
+    // price data exists for the 3 new subsidiaries yet, and this is
+    // being revisited for Rays too later) — cache keys are still
+    // org-scoped here for correctness/future-proofing, even though
+    // nothing new is being triggered for non-Rays orgs at this time.
+    const rrCatalog = await storeGet(orgScopedKey(KEYS.REFERENCE_RATE_CATALOG, orgKey)).catch(() => null) || {};
+    const rrHistory = await storeGet(orgScopedKey(KEYS.REFERENCE_RATE_HISTORY, orgKey)).catch(() => null) || {};
     // Fetched once per request (cached ~15min inside), not once per PO —
     // real advance-paid-so-far data for check #17 (Advance Reconciliation).
     console.time('[TIMING] getAdvancePaidByPO');
-    const advancePaidByPO = await getAdvancePaidByPO().catch(() => ({}));
+    const advancePaidByPO = await getAdvancePaidByPO(orgKey).catch(() => ({}));
     console.timeEnd('[TIMING] getAdvancePaidByPO');
     // AI-judged compliance is now a BLOCKING step, by explicit design
     // decision: the tab must never render a PO with "Pending AI review"
@@ -60,15 +75,16 @@ export default async function handler(req, res) {
     // near-instantly; this only does real work when something's
     // genuinely new/changed since the last check.
     console.time('[TIMING] processAIQueueForPOs');
-    const aiQueueResult = await processAIQueueForPOs(pos, { timeBudgetMs: 260000 });
+    const aiQueueResult = await processAIQueueForPOs(pos, { timeBudgetMs: 260000 }, orgKey);
     console.timeEnd('[TIMING] processAIQueueForPOs');
     if (aiQueueResult.stoppedReason) {
-      console.warn(`AI queue stopped early for POs: ${aiQueueResult.stoppedReason} (${aiQueueResult.processed}/${aiQueueResult.totalNeeded} completed)`);
+      console.warn(`[${orgKey}] AI queue stopped early for POs: ${aiQueueResult.stoppedReason} (${aiQueueResult.processed}/${aiQueueResult.totalNeeded} completed)`);
     }
 
     // AI-judged compliance results — read fresh AFTER the batch above,
-    // since that batch just updated this same cache in place.
-    const aiCache = (await storeGet(KEYS.AI_COMPLIANCE_CACHE)) || {};
+    // since that batch just updated this same cache in place. Org-scoped
+    // read, matching what Phase 3 will write to.
+    const aiCache = (await storeGet(orgScopedKey(KEYS.AI_COMPLIANCE_CACHE, orgKey))) || {};
 
     console.time('[TIMING] enrich all POs (map)');
     const enriched = await Promise.all(pos.map(async po => {

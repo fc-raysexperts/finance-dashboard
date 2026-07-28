@@ -251,7 +251,7 @@ function RecBox({ rec }) {
 }
 
 // ----- COMPLIANCE TABLE -----
-function CompTable({ checks, title, pbpType, pbpId, onRecheckDone }) {
+function CompTable({ checks, title, pbpType, pbpId, orgKey, onRecheckDone }) {
   const [rechecking, setRechecking] = useState(false);
   const [recheckError, setRecheckError] = useState(null);
   if (!checks || !checks.length) return null;
@@ -260,7 +260,7 @@ function CompTable({ checks, title, pbpType, pbpId, onRecheckDone }) {
     try {
       const r = await fetch('/api/recheck-compliance', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ type: pbpType, id: pbpId }),
+        body: JSON.stringify({ type: pbpType, id: pbpId, org: orgKey }),
       });
       const d = await r.json();
       if (!d.success) { setRecheckError(d.error || 'Re-check failed'); }
@@ -1703,7 +1703,7 @@ function Attachments({ docs, onPreview, title }) {
 }
 
 // ----- DETAIL MODAL (PO / BILL / PMO) -----
-function DetailModal({ item, type, onClose, onRecheckDone }) {
+function DetailModal({ item, type, orgKey, onClose, onRecheckDone }) {
   const isBill = type === 'bill', isPMO = type === 'pmo';
   const [fullTextView, setFullTextView] = useState(null); // {label, text} - only used for genuinely long Notes/Terms that would take up too much of the popup inline
   const [attachmentPreview, setAttachmentPreview] = useState(null); // {name, docType, docId} - opens a nested modal with the real PDF embedded
@@ -1917,7 +1917,7 @@ function DetailModal({ item, type, onClose, onRecheckDone }) {
         </div>
       )}
       <RecBox rec={item.recommendation}/>
-      <CompTable checks={item.compliance} title={(isPMO?'PMO':isBill?'Bill':'PO') + ' Compliance Checks'} pbpType={type} pbpId={item.id} onRecheckDone={onRecheckDone}/>
+      <CompTable checks={item.compliance} title={(isPMO?'PMO':isBill?'Bill':'PO') + ' Compliance Checks'} pbpType={type} pbpId={item.id} orgKey={orgKey} onRecheckDone={onRecheckDone}/>
       {!isPMO && pfbChecks && pfbChecks.length>0 && <PFBAlignmentTable checks={pfbChecks} title="PFB Alignment - Line by Line"/>}
       {!isPMO && (!pfbChecks || pfbChecks.length===0) && pfbUnavailableReason && (
         <div style={{background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:8,padding:'10px 14px',marginBottom:20,fontSize:13,color:'#9a3412'}}>
@@ -1949,12 +1949,12 @@ function DetailModal({ item, type, onClose, onRecheckDone }) {
     {attachmentPreview && (
       <Modal onClose={function(){setAttachmentPreview(null);}} width={800} title={attachmentPreview.name} zIndex={1100}>
         <iframe
-          src={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}`}
+          src={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}&org=${orgKey}`}
           style={{width:'100%',height:'70vh',border:'1px solid #e2e8f0',borderRadius:8}}
           title={attachmentPreview.name}
         />
         <div style={{marginTop:8,textAlign:'right'}}>
-          <a href={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
+          <a href={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}&org=${orgKey}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
             Open in new tab / download
           </a>
         </div>
@@ -1970,7 +1970,7 @@ function DetailModal({ item, type, onClose, onRecheckDone }) {
 }
 
 // ----- SEARCH OVERLAY -----
-function SearchBox({ type, onClose, onSelect }) {
+function SearchBox({ type, orgKey, onClose, onSelect }) {
   const [q,setQ]=useState(''); const [results,setR]=useState([]); const [loading,setL]=useState(false);
   const timer = useRef(null);
   useEffect(function(){
@@ -1979,7 +1979,7 @@ function SearchBox({ type, onClose, onSelect }) {
     timer.current = setTimeout(async function(){
       setL(true);
       try {
-        const r = await fetch('/api/search?type=' + type + '&q=' + encodeURIComponent(q));
+        const r = await fetch('/api/search?type=' + type + '&q=' + encodeURIComponent(q) + '&org=' + orgKey);
         const d = await r.json();
         setR(d.data || []);
       } catch (e) {}
@@ -2025,7 +2025,7 @@ function SearchBox({ type, onClose, onSelect }) {
 // only. No Compliance Checks, no Recommendation, no PFB/Match/Reference-
 // Rate tables — this is for quickly looking up any past PBP in the
 // firm's full history, not for re-running the approval workflow on it.
-function SearchResultModal({ type, id, onClose }) {
+function SearchResultModal({ type, id, orgKey, onClose }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -2034,7 +2034,7 @@ function SearchResultModal({ type, id, onClose }) {
   useEffect(function(){
     let cancelled = false;
     setLoading(true); setError(null);
-    fetch(`/api/search-detail?type=${type}&id=${id}`)
+    fetch(`/api/search-detail?type=${type}&id=${id}&org=${orgKey}`)
       .then(function(r){ return r.json(); })
       .then(function(d){
         if (cancelled) return;
@@ -2092,12 +2092,12 @@ function SearchResultModal({ type, id, onClose }) {
       {attachmentPreview && (
         <Modal onClose={function(){setAttachmentPreview(null);}} width={800} title={attachmentPreview.name} zIndex={1100}>
           <iframe
-            src={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}`}
+            src={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}&org=${orgKey}`}
             title={attachmentPreview.name}
             style={{width:'100%',height:'70vh',border:'none'}}
           />
           <div style={{marginTop:10}}>
-            <a href={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
+            <a href={`/api/attachment-proxy?documentId=${attachmentPreview.documentId}&filename=${encodeURIComponent(attachmentPreview.name)}&org=${orgKey}`} target="_blank" rel="noreferrer" style={{fontSize:12,color:'#2563eb'}}>
               Open in new tab
             </a>
           </div>
@@ -2140,6 +2140,18 @@ export async function getServerSideProps(context) {
 // =================================================================
 // MAIN DASHBOARD
 // =================================================================
+// Client-safe subsidiary list — deliberately does NOT mirror
+// lib/subsidiaries.js's org IDs or env var names (those must stay
+// server-only). The frontend only ever needs the KEY (sent to every API
+// call so the backend can resolve the real org ID) plus display info.
+const SUBSIDIARIES_CLIENT = {
+  rays:   { name: 'Rays Power Experts Ltd.',      features: { solarParks: true,  projects: true,  pfbTab: true  } },
+  energy: { name: 'RPE Energy Reserve Pvt. Ltd.', features: { solarParks: false, projects: false, pfbTab: true  } },
+  om:     { name: 'Rays O&M Experts Pvt. Ltd.',   features: { solarParks: false, projects: false, pfbTab: true  } },
+  tech:   { name: 'RPE Technologies Pvt. Ltd.',   features: { solarParks: false, projects: false, pfbTab: false } },
+};
+const SUBSIDIARY_KEYS_ORDERED = ['rays', 'energy', 'om', 'tech'];
+
 export default function Dashboard() {
   const [tab,          setTab]        = useState('pos');
   const [pos,          setPOs]        = useState([]);
@@ -2166,49 +2178,106 @@ export default function Dashboard() {
   const [pmoComplianceQueueStatus, setPmoComplianceQueueStatus] = useState({ running: false, percent: 100, processed: 0, total: 0 });
   const [errors,       setErrors]     = useState({});
   const [showUpdateRates, setShowUpdateRates] = useState(false);
+  const [selectedOrg,  setSelectedOrg] = useState('rays'); // subsidiary key — read from localStorage on mount, defaults to Rays
+  const [showOrgDropdown, setShowOrgDropdown] = useState(false);
+  const [pmoModuleUnavailable, setPmoModuleUnavailable] = useState(null);
+
+  // Real bug fixed: every fetch function below used to apply its result
+  // unconditionally once the network call resolved — with no check for
+  // whether the user had ALREADY switched to a different subsidiary
+  // while that fetch was still in flight. Confirmed real symptom: a
+  // slow Rays fetch (PMOs alone took up to 107s in real testing) could
+  // finish AFTER switching to Tech and silently overwrite Tech's
+  // correctly-loaded, already-displayed data with stale Rays data — with
+  // nothing to catch it until a manual Refresh forced a fresh,
+  // uncontested fetch. selectedOrgRef always holds the CURRENT value
+  // synchronously (unlike the `selectedOrg` closure each fetch function
+  // captured at creation time, which goes stale the instant the user
+  // switches orgs) — every fetch function below checks this ref right
+  // before committing its result to state, and silently discards its
+  // own result if the org has since changed.
+  const selectedOrgRef = useRef(selectedOrg);
+  useEffect(function(){ selectedOrgRef.current = selectedOrg; }, [selectedOrg]);
+
+  // Load the persisted subsidiary selection on mount. Done in an effect
+  // (not during initial render) since localStorage doesn't exist during
+  // server-side rendering — reading it directly at render time would
+  // cause a hydration mismatch between server and client.
+  useEffect(function(){
+    try {
+      const saved = window.localStorage.getItem('selectedOrg');
+      if (saved && SUBSIDIARIES_CLIENT[saved]) setSelectedOrg(saved);
+    } catch (e) { /* localStorage unavailable — just stay on the default */ }
+  }, []);
+
+  function handleSelectOrg(key) {
+    setSelectedOrg(key);
+    setShowOrgDropdown(false);
+    try { window.localStorage.setItem('selectedOrg', key); } catch (e) {}
+  }
 
   const fetchPOs = useCallback(async function(forceRefresh){
+    const requestedOrg = selectedOrg;
     setLoading(function(p){ return Object.assign({},p,{pos:true}); });
     try {
-      const r = await fetch('/api/pos' + (forceRefresh ? '?refresh=1' : ''));
+      const r = await fetch(`/api/pos?org=${requestedOrg}` + (forceRefresh ? '&refresh=1' : ''));
       const d = await r.json();
+      if (selectedOrgRef.current !== requestedOrg) return; // stale — user has since switched orgs, discard silently
       if (d.success) { setPOs(d.data); setLastSync(new Date()); setErrors(function(p){ return Object.assign({},p,{pos:null}); }); }
       else setErrors(function(p){ return Object.assign({},p,{pos:d.error||'Failed to load POs'}); });
-    } catch (e) { setErrors(function(p){ return Object.assign({},p,{pos:e.message}); }); }
-    setLoading(function(p){ return Object.assign({},p,{pos:false}); });
-  }, []);
+    } catch (e) { if (selectedOrgRef.current === requestedOrg) setErrors(function(p){ return Object.assign({},p,{pos:e.message}); }); }
+    if (selectedOrgRef.current === requestedOrg) setLoading(function(p){ return Object.assign({},p,{pos:false}); });
+  }, [selectedOrg]);
 
   const fetchBills = useCallback(async function(forceRefresh){
+    const requestedOrg = selectedOrg;
     setLoading(function(p){ return Object.assign({},p,{bills:true}); });
     try {
-      const r = await fetch('/api/bills' + (forceRefresh ? '?refresh=1' : ''));
+      const r = await fetch(`/api/bills?org=${requestedOrg}` + (forceRefresh ? '&refresh=1' : ''));
       const d = await r.json();
+      if (selectedOrgRef.current !== requestedOrg) return; // stale — discard silently
       if (d.success) { setBills(d.data); setErrors(function(p){ return Object.assign({},p,{bills:null}); }); }
       else setErrors(function(p){ return Object.assign({},p,{bills:d.error||'Failed to load Bills'}); });
-    } catch (e) { setErrors(function(p){ return Object.assign({},p,{bills:e.message}); }); }
-    setLoading(function(p){ return Object.assign({},p,{bills:false}); });
-  }, []);
+    } catch (e) { if (selectedOrgRef.current === requestedOrg) setErrors(function(p){ return Object.assign({},p,{bills:e.message}); }); }
+    if (selectedOrgRef.current === requestedOrg) setLoading(function(p){ return Object.assign({},p,{bills:false}); });
+  }, [selectedOrg]);
 
   const fetchPMOs = useCallback(async function(forceRefresh){
+    const requestedOrg = selectedOrg;
     setLoading(function(p){ return Object.assign({},p,{pmos:true}); });
     try {
-      const r = await fetch('/api/pmos' + (forceRefresh ? '?refresh=1' : ''));
+      const r = await fetch(`/api/pmos?org=${requestedOrg}` + (forceRefresh ? '&refresh=1' : ''));
       const d = await r.json();
-      if (d.success) { setPMOs(d.data); setErrors(function(p){ return Object.assign({},p,{pmos:null}); }); }
-      else setErrors(function(p){ return Object.assign({},p,{pmos:d.error||'Failed to load PMOs'}); });
-    } catch (e) { setErrors(function(p){ return Object.assign({},p,{pmos:e.message}); }); }
-    setLoading(function(p){ return Object.assign({},p,{pmos:false}); });
-  }, []);
+      if (selectedOrgRef.current !== requestedOrg) return; // stale — discard silently
+      if (d.success) {
+        setPMOs(d.data);
+        setErrors(function(p){ return Object.assign({},p,{pmos:null}); });
+        // Real, likely-permanent situation for a newly-added subsidiary:
+        // the "Payment Memos" custom module hasn't been set up yet for
+        // this organization in Zoho Books — distinct from a genuine
+        // error, so shown as a friendly notice, not a red error banner.
+        setPmoModuleUnavailable(d.moduleUnavailable ? d.error : null);
+      }
+      else { setErrors(function(p){ return Object.assign({},p,{pmos:d.error||'Failed to load PMOs'}); }); setPmoModuleUnavailable(null); }
+    } catch (e) { if (selectedOrgRef.current === requestedOrg) setErrors(function(p){ return Object.assign({},p,{pmos:e.message}); }); }
+    if (selectedOrgRef.current === requestedOrg) setLoading(function(p){ return Object.assign({},p,{pmos:false}); });
+  }, [selectedOrg]);
 
+  // Solar Parks / Projects are Rays-specific — no point fetching or
+  // keeping this data for other subsidiaries at all, since their tabs
+  // are hidden entirely for them.
   const fetchProjects = useCallback(async function(){
+    const requestedOrg = selectedOrg;
+    if (requestedOrg !== 'rays') { setProjects([]); setFirms([]); setParks([]); return; }
     setLoading(function(p){ return Object.assign({},p,{projects:true}); });
     try {
       const r = await fetch('/api/projects');
       const d = await r.json();
+      if (selectedOrgRef.current !== requestedOrg) return; // stale — user switched away from Rays while this was in flight
       if (d.success) { setProjects(d.allProjects||[]); setFirms(d.firms||[]); setParks(d.parks||[]); }
     } catch (e) {}
-    setLoading(function(p){ return Object.assign({},p,{projects:false}); });
-  }, []);
+    if (selectedOrgRef.current === requestedOrg) setLoading(function(p){ return Object.assign({},p,{projects:false}); });
+  }, [selectedOrg]);
 
   const fetchPFB = async function(proj){
     const key = proj.id;
@@ -2263,6 +2332,17 @@ export default function Dashboard() {
     return day >= 1 && day <= 6 && hour >= 10 && hour < 18;
   }
 
+  // Safety net: if switching subsidiaries leaves the currently-viewed
+  // tab hidden (e.g. viewing Solar Parks, then switching to a
+  // subsidiary that doesn't have that tab at all), fall back to POs
+  // rather than leaving someone stuck on a tab with no way back to it.
+  useEffect(function(){
+    const featureRequirement = { pfbs: 'pfbTab', projects: 'projects', parks: 'solarParks' }[tab];
+    if (featureRequirement && !SUBSIDIARIES_CLIENT[selectedOrg].features[featureRequirement]) {
+      setTab('pos');
+    }
+  }, [selectedOrg, tab]);
+
   useEffect(function(){
     // Page load/reload: serve from whatever's cached server-side — this
     // costs zero Zoho calls once a cache exists (see lib/zoho.js / pmos.js).
@@ -2303,7 +2383,7 @@ export default function Dashboard() {
     let timer = null;
     async function poll() {
       try {
-        const r = await fetch('/api/ai-queue-status');
+        const r = await fetch('/api/ai-queue-status?org=' + selectedOrg);
         const d = await r.json();
         if (cancelled) return;
         setComplianceQueueStatus(d);
@@ -2314,7 +2394,7 @@ export default function Dashboard() {
     }
     poll();
     return function(){ cancelled = true; if (timer) clearTimeout(timer); };
-  }, []);
+  }, [selectedOrg]);
 
   // Same adaptive pattern for the Bills tab's own independent AI queue status.
   useEffect(function(){
@@ -2322,7 +2402,7 @@ export default function Dashboard() {
     let timer = null;
     async function poll() {
       try {
-        const r = await fetch('/api/ai-queue-status-bill');
+        const r = await fetch('/api/ai-queue-status-bill?org=' + selectedOrg);
         const d = await r.json();
         if (cancelled) return;
         setBillComplianceQueueStatus(d);
@@ -2333,7 +2413,7 @@ export default function Dashboard() {
     }
     poll();
     return function(){ cancelled = true; if (timer) clearTimeout(timer); };
-  }, []);
+  }, [selectedOrg]);
 
   // Same adaptive pattern for the PMOs tab's own independent AI queue status.
   useEffect(function(){
@@ -2341,7 +2421,7 @@ export default function Dashboard() {
     let timer = null;
     async function poll() {
       try {
-        const r = await fetch('/api/ai-queue-status-pmo');
+        const r = await fetch('/api/ai-queue-status-pmo?org=' + selectedOrg);
         const d = await r.json();
         if (cancelled) return;
         setPmoComplianceQueueStatus(d);
@@ -2352,7 +2432,7 @@ export default function Dashboard() {
     }
     poll();
     return function(){ cancelled = true; if (timer) clearTimeout(timer); };
-  }, []);
+  }, [selectedOrg]);
 
   const sortByDate = function(arr, field) {
     return arr.slice().sort(function(a,b){
@@ -2431,12 +2511,39 @@ export default function Dashboard() {
             <div style={{width:32,height:32,background:'#1d4ed8',borderRadius:8,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontSize:17}}>{'\u26A1'}</div>
             <div>
               <div style={{fontWeight:800,fontSize:15,color:'#0f172a',letterSpacing:'-0.02em'}}>Finance Control Dashboard</div>
-              <div style={{fontSize:11,color:'#94a3b8'}}>Rays Power Experts Ltd.</div>
+              <div style={{fontSize:11,color:'#94a3b8'}}>{SUBSIDIARIES_CLIENT[selectedOrg].name}</div>
+            </div>
+
+            {/* Subsidiary selector — switches between the 4 organizations
+                under Cyrun Infra Projects LLP. Persisted in localStorage
+                so the choice survives a page reload. */}
+            <div style={{position:'relative'}}>
+              <button onClick={function(){setShowOrgDropdown(function(p){return !p;});}}
+                style={{display:'flex',alignItems:'center',gap:6,background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:8,padding:'6px 12px',cursor:'pointer',fontSize:12,fontWeight:600,color:'#334155'}}>
+                {SUBSIDIARIES_CLIENT[selectedOrg].name}
+                <span style={{fontSize:10,color:'#94a3b8'}}>{'\u25BE'}</span>
+              </button>
+              {showOrgDropdown && (
+                <>
+                  <div onClick={function(){setShowOrgDropdown(false);}} style={{position:'fixed',inset:0,zIndex:299}}/>
+                  <div style={{position:'absolute',top:'110%',left:0,background:'#fff',border:'1px solid #e2e8f0',borderRadius:8,boxShadow:'0 8px 24px rgba(0,0,0,0.12)',zIndex:300,minWidth:220,overflow:'hidden'}}>
+                    {SUBSIDIARY_KEYS_ORDERED.map(function(key){
+                      return (
+                        <div key={key} onClick={function(){handleSelectOrg(key);}}
+                          style={{padding:'10px 14px',fontSize:13,fontWeight:key===selectedOrg?700:500,color:key===selectedOrg?'#1d4ed8':'#334155',background:key===selectedOrg?'#eff6ff':'#fff',cursor:'pointer'}}>
+                          {SUBSIDIARIES_CLIENT[key].name}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
-          {/* True-centered regardless of how wide the side elements are */}
-          <div style={{position:'absolute',left:'50%',top:'50%',transform:'translate(-50%,-50%)',display:'flex',alignItems:'center',gap:14}}>
+          {/* Shifted a little right of true-center, per explicit request,
+              to make visual room for the subsidiary selector above. */}
+          <div style={{position:'absolute',left:'56%',top:'50%',transform:'translate(-50%,-50%)',display:'flex',alignItems:'center',gap:14}}>
             {totalFlag>0 && <div style={{background:'#fee2e2',color:'#b91c1c',padding:'3px 12px',borderRadius:20,fontSize:12,fontWeight:700,border:'1px solid #fca5a5',whiteSpace:'nowrap'}}>{totalFlag} need attention</div>}
             {lastSync && <div style={{fontSize:12,color:'#94a3b8',display:'flex',alignItems:'center',gap:5,whiteSpace:'nowrap'}}><span style={{width:6,height:6,borderRadius:'50%',background:'#22c55e',display:'inline-block'}}/>Live - {lastSync.toLocaleTimeString()}</div>}
           </div>
@@ -2473,8 +2580,8 @@ export default function Dashboard() {
           <Card label="BILL ISSUES" icon={'\u26A0\uFE0F'} value={billIssues} sub="compliance / alignment" color="#ef4444"/>
           <Card label="PMOs PENDING" icon={'\u{1F4B3}'} value={pmos.length} sub={fmt(pmoValue)} color="#0ea5e9"/>
           <Card label="PMO ISSUES" icon={'\u26A0\uFE0F'} value={pmoIssues} sub={'of ' + pmos.length + ' PMOs'} color="#ef4444"/>
-          <Card label="PROJECTS" icon={'\u{1F31E}'} value={projects.length} sub={parks.length + ' solar parks'} color="#10b981"/>
           <Card label="TOTAL PENDING" icon={'\u{1F4CC}'} value={totalPendingCount} sub={fmt(totalPendingValue)} color="#dc2626"/>
+          <Card label="TOTAL ISSUES" icon={'\u26A0\uFE0F'} value={totalFlag} sub="compliance / alignment" color="#b91c1c"/>
         </div>
 
         <div style={{background:'#fff',borderBottom:'1.5px solid #e2e8f0',padding:'0 24px',display:'flex',alignItems:'center',justifyContent:'space-between',position:'sticky',top:58,zIndex:100,boxShadow:'0 1px 3px rgba(0,0,0,0.03)'}}>
@@ -2483,10 +2590,12 @@ export default function Dashboard() {
               {id:'pos',   label:'POs (' + pos.length + ')',    warn:poIssues},
               {id:'bills', label:'Bills (' + bills.length + ')', warn:billIssues},
               {id:'pmos',  label:'PMOs (' + pmos.length + ')',   warn:pmoIssues},
-              {id:'pfbs',  label:'PFBs'},
-              {id:'projects',label:'Projects (' + projects.length + ')'},
-              {id:'parks', label:'Solar Parks (' + parks.length + ')'},
-            ].map(function(t){
+              {id:'pfbs',  label:'PFBs', requiresFeature:'pfbTab'},
+              {id:'projects',label:'Projects (' + projects.length + ')', requiresFeature:'projects'},
+              {id:'parks', label:'Solar Parks (' + parks.length + ')', requiresFeature:'solarParks'},
+            ].filter(function(t){
+              return !t.requiresFeature || SUBSIDIARIES_CLIENT[selectedOrg].features[t.requiresFeature];
+            }).map(function(t){
               return (
                 <button key={t.id} onClick={function(){setTab(t.id);}} style={{padding:'11px 16px',cursor:'pointer',border:'none',background:'transparent',color:tab===t.id?'#1d4ed8':'#64748b',borderBottom:tab===t.id?'2.5px solid #1d4ed8':'2.5px solid transparent',fontSize:13,fontWeight:tab===t.id?700:500,display:'flex',alignItems:'center',gap:5}}>
                   {t.label}
@@ -2627,9 +2736,18 @@ export default function Dashboard() {
           {tab==='pmos' && (
             <div className="fade">
               <ErrorBanner message={errors.pmos} onRetry={function(){fetchPMOs(true);}}/>
+              {pmoModuleUnavailable && !errors.pmos && (
+                <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:10,padding:'16px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'flex-start'}}>
+                  <span style={{fontSize:18}}>{'\u2139\uFE0F'}</span>
+                  <div>
+                    <div style={{fontWeight:700,color:'#1e3a8a',fontSize:13,marginBottom:2}}>PMOs not available for this organization yet</div>
+                    <div style={{fontSize:12,color:'#3b5bab'}}>{pmoModuleUnavailable}</div>
+                  </div>
+                </div>
+              )}
               {loading.pmos ? <Spinner label="Loading Payment Memos from Zoho... (first load can take about 1 minute)"/> : (
                 pmos.length===0 ? (
-                  !errors.pmos && <div style={{background:'#fff',borderRadius:12,border:'1px solid #e2e8f0',padding:'48px',textAlign:'center'}}>
+                  !errors.pmos && !pmoModuleUnavailable && <div style={{background:'#fff',borderRadius:12,border:'1px solid #e2e8f0',padding:'48px',textAlign:'center'}}>
                     <div style={{fontSize:15,fontWeight:600,color:'#64748b'}}>No Payment Memos pending approval</div>
                   </div>
                 ) : (
@@ -2814,7 +2932,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {selected && <DetailModal item={selected.item} type={selected.type} onClose={function(){setSelected(null);}}
+      {selected && <DetailModal item={selected.item} type={selected.type} orgKey={selectedOrg} onClose={function(){setSelected(null);}}
         onRecheckDone={function(){
           if (selected.type==='po') fetchPOs(true);
           else if (selected.type==='bill') fetchBills(true);
@@ -2825,8 +2943,8 @@ export default function Dashboard() {
       {pfbFlow && pfbFlow.step==='confirm' && <PFBVarConfirm proj={pfbFlow.proj} onClose={function(){setPFBFlow(null);}} onYes={onPFBYes} onNo={onPFBNo}/>}
       {pfbFlow && pfbFlow.step==='edit' && <PFBVarEdit proj={pfbFlow.proj} onClose={function(){setPFBFlow(null);}} onSave={onPFBSave}/>}
       {pfbFlow && pfbFlow.step==='show' && pfbFlow.pfbData && <PFBDisplay proj={pfbFlow.proj} data={pfbFlow.pfbData} onClose={function(){setPFBFlow(null);}}/>}
-      {showSearch && <SearchBox type={showSearch} onClose={function(){setSearch(null);}} onSelect={function(r){ setSearch(null); setSearchResult({ type: r.type, id: r.id }); }}/>}
-      {searchResult && <SearchResultModal type={searchResult.type} id={searchResult.id} onClose={function(){setSearchResult(null);}}/>}
+      {showSearch && <SearchBox type={showSearch} orgKey={selectedOrg} onClose={function(){setSearch(null);}} onSelect={function(r){ setSearch(null); setSearchResult({ type: r.type, id: r.id }); }}/>}
+      {searchResult && <SearchResultModal type={searchResult.type} id={searchResult.id} orgKey={selectedOrg} onClose={function(){setSearchResult(null);}}/>}
       {showAddProj && <AddProjectModal onClose={function(){setShowAddProj(false);}} onSaved={fetchProjects} parkNames={parkNames}/>}
       {showAddPark && <AddParkModal onClose={function(){setShowAddPark(false);}} onSaved={fetchProjects}/>}
       {showUpdateRates && <UpdateRatesModal onClose={function(){setShowUpdateRates(false);}} onDone={fetchProjects}/>}

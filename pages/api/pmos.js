@@ -20,19 +20,20 @@ import { processAIQueueForPMOs, buildFingerprint } from '../../lib/aiComplianceE
 import { getRecentPMOSignatures } from '../../lib/advanceReconcile';
 const axios = require('axios');
 const { getAccessToken } = require('../../lib/zohoToken');
-const { storeGet, storeSet, KEYS } = require('../../lib/store');
+const { storeGet, storeSet, KEYS, orgScopedKey } = require('../../lib/store');
+const { getOrgId, getPMOModuleName } = require('../../lib/subsidiaries');
 
 const JATIN_USER_ID  = '2346113000000742107';
 const APPROVER_EMAIL = 'jatin.srivastava@raysexperts.com';
-const PMO_MODULE     = 'cm_payment_memos';
 
-async function zohoGET(path, params = {}) {
+async function zohoGET(path, params = {}, orgKey = 'rays') {
   let token = await getAccessToken();
+  const organizationId = getOrgId(orgKey);
   for (let i = 1; i <= 3; i++) {
     try {
       const res = await axios.get(`https://www.zohoapis.in/books/v3${path}`, {
         headers: { Authorization: `Zoho-oauthtoken ${token}` },
-        params:  { organization_id: process.env.ZOHO_ORG_ID, ...params }
+        params:  { organization_id: organizationId, ...params }
       });
       return res.data;
     } catch (e) {
@@ -53,9 +54,23 @@ async function zohoGET(path, params = {}) {
   }
 }
 
-const detailCache     = {}; // id -> full record, ONLY for items confirmed to be Jatin's
-const checkedSnapshot = {}; // id -> { modified, isJatin, v } for EVERY item ever checked, tiny
-let hydrated = false; // have we tried loading from KV yet, this process lifetime?
+// Real bug fixed here (same class as lib/zoho.js's original issue):
+// these used to be plain module-level variables, shared across EVERY
+// request regardless of which organization was selected. Now keyed per
+// organization — each subsidiary gets its own completely independent
+// slot, created on first use. Rays' behavior is unaffected: its slot is
+// functionally identical to what the old flat variables provided.
+const STATE = {};
+function getPMOStateSlot(orgKey) {
+  if (!STATE[orgKey]) {
+    STATE[orgKey] = {
+      detailCache: {},     // id -> full record, ONLY for items confirmed to be Jatin's
+      checkedSnapshot: {}, // id -> { modified, isJatin, v } for EVERY item ever checked, tiny
+      hydrated: false,     // have we tried loading from KV yet, this process lifetime?
+    };
+  }
+  return STATE[orgKey];
+}
 
 // Bumped whenever the SHAPE of what gets extracted/cached changes (like
 // this round's module_record_hash breakup fix) — not just whenever the
@@ -64,25 +79,49 @@ let hydrated = false; // have we tried loading from KV yet, this process lifetim
 // which has no way to reflect a code change on this end — so every deploy
 // that changed extraction logic kept silently serving PRE-FIX cached data
 // forever, invisibly, until it was noticed the numbers still looked wrong.
-const CACHE_SCHEMA_VERSION = 2;
+const CACHE_SCHEMA_VERSION = 3; // bumped: also now invalidates any cache built before the persisted-cache schemaVersion check existed at all (see hydrateFromPersistedStore)
 
-async function hydrateFromPersistedStore() {
-  if (hydrated) return;
-  hydrated = true;
+async function hydrateFromPersistedStore(orgKey = 'rays') {
+  const state = getPMOStateSlot(orgKey);
+  if (state.hydrated) return;
+  state.hydrated = true;
   try {
-    const persisted = await storeGet(KEYS.ZOHO_DELTA_PMOS);
-    // checkedSnapshot is the new shape — an old persisted cache (pre-
-    // redesign) won't have it, so it's treated as nothing usable yet and
-    // this does one clean bootstrap under the new, much smaller structure.
-    if (persisted && persisted.checkedSnapshot && Object.keys(persisted.checkedSnapshot).length > 0) {
-      Object.assign(detailCache, persisted.detailCache || {});
-      Object.assign(checkedSnapshot, persisted.checkedSnapshot || {});
+    const persisted = await storeGet(orgScopedKey(KEYS.ZOHO_DELTA_PMOS, orgKey));
+    // Real bug fixed: a cache built BEFORE a real bug fix (e.g. today's
+    // PMO module-name correction) can persist its wrong/incomplete
+    // results indefinitely — the outer "serve straight from cache, zero
+    // Zoho calls" fast-path below only checks whether checkedSnapshot
+    // has ANY entries at all, not whether those entries are trustworthy.
+    // Confirmed real symptom: Tech's PMOs showed "cache hit — 0 records"
+    // on a normal load even after the module-name fix was already
+    // live, because a snapshot from before the fix (correctly reflecting
+    // 0 records under the OLD, broken module name) was still sitting in
+    // KV and looked "non-empty enough" to trust.
+    //
+    // Rejecting the ENTIRE persisted cache outright whenever its
+    // recorded schema version doesn't match the current one (rather than
+    // only checking version record-by-record during a deep scan, which
+    // never even runs if this fast-path already decided to trust the
+    // cache) forces exactly one clean, real re-scan the next time this
+    // runs — self-correcting automatically, with no manual per-org
+    // Refresh click needed. checkedSnapshot is deliberately left EMPTY
+    // in this case (not partially populated), so the fast-path below
+    // naturally falls through to a real scan on its own — no changes
+    // needed there at all.
+    if (persisted && persisted.schemaVersion === CACHE_SCHEMA_VERSION && persisted.checkedSnapshot && Object.keys(persisted.checkedSnapshot).length > 0) {
+      Object.assign(state.detailCache, persisted.detailCache || {});
+      Object.assign(state.checkedSnapshot, persisted.checkedSnapshot || {});
     }
   } catch { /* KV unavailable — proceed with whatever's in memory */ }
 }
 
-async function persistStore() {
-  await storeSet(KEYS.ZOHO_DELTA_PMOS, { detailCache, checkedSnapshot }).catch(() => {});
+async function persistStore(orgKey = 'rays') {
+  const state = getPMOStateSlot(orgKey);
+  await storeSet(orgScopedKey(KEYS.ZOHO_DELTA_PMOS, orgKey), {
+    schemaVersion: CACHE_SCHEMA_VERSION,
+    detailCache: state.detailCache,
+    checkedSnapshot: state.checkedSnapshot,
+  }).catch(() => {});
 }
 
 export function extractFields(moduleFields) {
@@ -114,15 +153,27 @@ export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
+    // Real subsidiary selection — same convention as pos.js/bills.js
+    // (Phase 2), defaults to 'rays' for full backward compatibility.
+    const orgKey = req.query.org || 'rays';
+    // Real bug fixed: the PMO custom module's actual API name genuinely
+    // differs per organization — confirmed via a live diagnostic call.
+    // Rays uses "cm_payment_memos" (plural); Energy/OM use
+    // "cm_payment_memo" (singular). This was previously a single
+    // hardcoded module-level constant, which is why Energy/OM got a 404
+    // — the code was calling an endpoint that genuinely doesn't exist
+    // for them under that name.
+    const PMO_MODULE = getPMOModuleName(orgKey);
     const forceRefresh = req.query.refresh === '1';
-    await hydrateFromPersistedStore();
+    await hydrateFromPersistedStore(orgKey);
+    const state = getPMOStateSlot(orgKey);
 
     let detailed;
 
-    if (!forceRefresh && Object.keys(checkedSnapshot).length > 0) {
+    if (!forceRefresh && Object.keys(state.checkedSnapshot).length > 0) {
       // Normal page load: serve straight from the persisted cache, zero Zoho calls
-      detailed = Object.values(detailCache);
-      console.log(`PMOs: cache hit — ${detailed.length} records, no Zoho calls`);
+      detailed = Object.values(state.detailCache);
+      console.log(`[${orgKey}] PMOs: cache hit — ${detailed.length} records, no Zoho calls`);
     } else {
       // KEY FIX: confirmed via real production logs that this account's
       // custom-module API returns its FULL history (created_time sorted,
@@ -152,14 +203,14 @@ export default async function handler(req, res) {
       let stoppedEarly = false;
       let scannedCount = 0;
       while (true) {
-        const data = await zohoGET(`/${PMO_MODULE}`, { per_page: 200, page, sort_column: 'last_modified_time', sort_order: 'D' });
+        const data = await zohoGET(`/${PMO_MODULE}`, { per_page: 200, page, sort_column: 'last_modified_time', sort_order: 'D' }, orgKey);
         const recs = data.module_records || [];
         scannedCount += recs.length;
 
         for (const r of recs) {
           const id       = r.module_record_id;
           const modified = r.last_modified_time || '';
-          const checked  = checkedSnapshot[id];
+          const checked  = state.checkedSnapshot[id];
           if (checked && checked.modified === modified && checked.v === CACHE_SCHEMA_VERSION) {
             stoppedEarly = true;
             break; // this, and everything older after it, is already known, unchanged, AND extracted with current logic
@@ -171,7 +222,7 @@ export default async function handler(req, res) {
         page++;
         await new Promise(r => setTimeout(r, 200));
       }
-      console.log(`PMOs: scanned ${scannedCount} records (stopped ${stoppedEarly ? 'early, hit already-known unchanged record' : 'at end of list'}), ${toFetch.length} new/changed to check`);
+      console.log(`[${orgKey}] PMOs: scanned ${scannedCount} records (stopped ${stoppedEarly ? 'early, hit already-known unchanged record' : 'at end of list'}), ${toFetch.length} new/changed to check`);
 
       if (toFetch.length > 0) {
         for (let i = 0; i < toFetch.length; i += 10) {
@@ -183,8 +234,8 @@ export default async function handler(req, res) {
             // anything else just gets a tiny "checked, not relevant"
             // marker so it's instantly skippable if seen again.
             if (r.status !== 'pending_approval') {
-              checkedSnapshot[id] = { modified, isJatin: false, v: CACHE_SCHEMA_VERSION };
-              delete detailCache[id];
+              state.checkedSnapshot[id] = { modified, isJatin: false, v: CACHE_SCHEMA_VERSION };
+              delete state.detailCache[id];
               return;
             }
             try {
@@ -198,28 +249,28 @@ export default async function handler(req, res) {
               // display-string counterpart). The earlier include=html
               // theory was wrong — confirmed no html key ever appears in
               // this response — so that param is dropped.
-              const det       = await zohoGET(`/${PMO_MODULE}/${id}`);
+              const det       = await zohoGET(`/${PMO_MODULE}/${id}`, {}, orgKey);
               const record    = det.data?.module_record || det.module_record || det;
               const recordHash = det.module_record_hash || det.data?.module_record_hash || {};
               record.__breakupSource = recordHash; // stashed for extraction below, not sent to frontend
               const isJatin = isJatinCurrentApprover(record);
-              checkedSnapshot[id] = { modified, isJatin, v: CACHE_SCHEMA_VERSION };
-              if (isJatin) detailCache[id] = record;
-              else delete detailCache[id]; // never keep full detail for anyone else's
+              state.checkedSnapshot[id] = { modified, isJatin, v: CACHE_SCHEMA_VERSION };
+              if (isJatin) state.detailCache[id] = record;
+              else delete state.detailCache[id]; // never keep full detail for anyone else's
             } catch { /* leave unmarked — will be retried next refresh */ }
           }));
           if (i + 10 < toFetch.length) await new Promise(r => setTimeout(r, 300));
         }
       }
 
-      await persistStore();
+      await persistStore(orgKey);
 
       // detailCache only ever contains Jatin's own by construction now
-      detailed = Object.values(detailCache);
+      detailed = Object.values(state.detailCache);
     }
 
     const jatinPMOs = detailed;
-    console.log(`PMOs: ${jatinPMOs.length} currently pending Jatin's approval`);
+    console.log(`[${orgKey}] PMOs: ${jatinPMOs.length} currently pending Jatin's approval`);
 
     // Real, confirmed (though undocumented) endpoint for a PMO's native
     // "Supporting Attachments" — found by inspecting Zoho Books' own web
@@ -231,7 +282,7 @@ export default async function handler(req, res) {
     // double the number of real API calls.
     async function fetchPMOSupportingAttachments(pmoRecordId) {
       try {
-        const data = await zohoGET(`/${PMO_MODULE}/${pmoRecordId}/attachment`);
+        const data = await zohoGET(`/${PMO_MODULE}/${pmoRecordId}/attachment`, {}, orgKey);
         // Structure not documented anywhere — logging the raw shape on
         // first real use so we can confirm/correct field names below.
         const list = data.documents || data.attachments || data.data || (Array.isArray(data) ? data : []);
@@ -296,17 +347,22 @@ export default async function handler(req, res) {
     console.log(`[AI PMO pre-pass] doc counts (PI/Bill + Supporting = total): ${pmoNormListForAI.map(p => `${p.pmo_number}:${(p.documents||[]).length}`).join(', ')}`);
 
     console.time('[TIMING] processAIQueueForPMOs');
-    const aiQueueResult = await processAIQueueForPMOs(pmoNormListForAI, { timeBudgetMs: 260000 });
+    // NOTE: processAIQueueForPMOs doesn't yet consume orgKey (Phase 3,
+    // lib/aiComplianceEngine.js) — passed forward so this file won't
+    // need touching again once that phase lands.
+    const aiQueueResult = await processAIQueueForPMOs(pmoNormListForAI, { timeBudgetMs: 260000 }, orgKey);
     console.timeEnd('[TIMING] processAIQueueForPMOs');
     if (aiQueueResult.stoppedReason) {
       console.warn(`AI queue stopped early for PMOs: ${aiQueueResult.stoppedReason} (${aiQueueResult.processed}/${aiQueueResult.totalNeeded} completed)`);
     }
-    const aiCache = (await storeGet(KEYS.AI_COMPLIANCE_CACHE)) || {};
+    const aiCache = (await storeGet(orgScopedKey(KEYS.AI_COMPLIANCE_CACHE, orgKey))) || {};
 
     // Real historical data for the Duplicate Payment Check — fetched
     // once per request, not once per PMO.
     console.time('[TIMING] getRecentPMOSignatures');
-    const pmoSignatures = await getRecentPMOSignatures().catch(() => []);
+    // NOTE: getRecentPMOSignatures doesn't yet consume orgKey (Phase 4,
+    // lib/advanceReconcile.js) — passed forward for the same reason.
+    const pmoSignatures = await getRecentPMOSignatures(orgKey).catch(() => []);
     console.timeEnd('[TIMING] getRecentPMOSignatures');
 
     console.time('[TIMING] enrich all PMOs (map)');
@@ -501,7 +557,25 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    console.error('PMOs API error:', err.message);
+    const status = err.response?.status;
+    console.error(`[${req.query.org || 'rays'}] PMOs API error (Zoho status ${status || 'n/a'}):`, err.message);
+    // A 404 or 403 here most likely means the "Payment Memos" custom
+    // module (cm_payment_memos) simply doesn't exist yet for this
+    // specific organization — custom modules are configured PER-ORG in
+    // Zoho Books, not shared automatically across sibling orgs under the
+    // same account, even though they share one login/refresh token. This
+    // is a real, likely-permanent situation for a newly-added
+    // organization until that module is actually set up in Zoho Books
+    // itself — not a transient error worth an ambiguous generic message.
+    if (status === 404 || status === 403) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        moduleUnavailable: true,
+        error: `The "Payment Memos" module doesn't appear to be set up yet for this organization in Zoho Books (received a ${status} from Zoho). This is expected for a newly-added organization until that custom module is configured there.`,
+        aiQueue: { completedFully: true, processed: 0, totalNeeded: 0, stoppedReason: null },
+      });
+    }
     return res.status(500).json({ success: false, error: err.message });
   }
 }

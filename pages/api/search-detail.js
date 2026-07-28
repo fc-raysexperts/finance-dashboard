@@ -10,26 +10,31 @@
 
 import { getPODetail, getBillDetail } from '../../lib/zoho';
 import { extractFields } from './pmos';
+import { getOrgId, getPMOModuleName } from '../../lib/subsidiaries';
 const axios = require('axios');
 const { getAccessToken } = require('../../lib/zohoToken');
 
-const PMO_MODULE = 'cm_payment_memos';
-async function zohoGET(path, params = {}) {
+async function zohoGET(path, params = {}, orgKey = 'rays') {
   const token = await getAccessToken();
   const res = await axios.get(`https://www.zohoapis.in/books/v3${path}`, {
     headers: { Authorization: `Zoho-oauthtoken ${token}` },
-    params: { organization_id: process.env.ZOHO_ORG_ID, ...params },
+    params: { organization_id: getOrgId(orgKey), ...params },
   });
   return res.data;
 }
 
 export default async function handler(req, res) {
-  const { type, id } = req.query;
+  const { type, id, org } = req.query;
   if (!type || !id) return res.status(400).json({ error: 'type and id are required' });
+  const orgKey = org || 'rays';
+  // Real bug fixed: PMO module API name genuinely differs per
+  // organization (confirmed via live diagnostic) — Rays uses the plural
+  // form, Energy/OM use the singular form.
+  const PMO_MODULE = getPMOModuleName(orgKey);
 
   try {
     if (type === 'po') {
-      const po = await getPODetail(id);
+      const po = await getPODetail(id, orgKey);
       if (!po) return res.status(404).json({ error: 'PO not found' });
       const vendorAddress = (function(){
         const addr = po.vendor_address || po.billing_address;
@@ -65,13 +70,13 @@ export default async function handler(req, res) {
     }
 
     if (type === 'bill') {
-      const bill = await getBillDetail(id);
+      const bill = await getBillDetail(id, orgKey);
       if (!bill) return res.status(404).json({ error: 'Bill not found' });
       let linkedPOTotal = '—';
       try {
         const ref = (bill.purchaseorders || [])[0];
         if (ref?.purchaseorder_id) {
-          const lp = await getPODetail(ref.purchaseorder_id);
+          const lp = await getPODetail(ref.purchaseorder_id, orgKey);
           if (lp) linkedPOTotal = lp.total;
         }
       } catch { /* best-effort only */ }
@@ -103,7 +108,7 @@ export default async function handler(req, res) {
     }
 
     if (type === 'pmo') {
-      const det = await zohoGET(`/${PMO_MODULE}/${id}`);
+      const det = await zohoGET(`/${PMO_MODULE}/${id}`, {}, orgKey);
       const record = det.data?.module_record || det.module_record || det;
       const recordHash = det.module_record_hash || det.data?.module_record_hash || {};
       const f = extractFields(record.module_fields);
@@ -114,7 +119,7 @@ export default async function handler(req, res) {
       // Real, confirmed (undocumented) endpoint for Supporting Attachments.
       let supportingDocs = [];
       try {
-        const attData = await zohoGET(`/${PMO_MODULE}/${id}/attachment`);
+        const attData = await zohoGET(`/${PMO_MODULE}/${id}/attachment`, {}, orgKey);
         const list = attData.documents || attData.attachments || attData.data || (Array.isArray(attData) ? attData : []);
         supportingDocs = list.map(d => ({
           document_id: d.document_id || d.attachment_id || d.file_id || d.id,

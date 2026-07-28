@@ -13,18 +13,19 @@
 import { getPODetail, getBillDetail } from '../../lib/zoho';
 import { getAIComplianceForPO, getAIComplianceForBill, getAIComplianceForPMO } from '../../lib/aiComplianceEngine';
 import { extractFields } from './pmos';
-const { storeGet, storeSet, KEYS } = require('../../lib/store');
+import { getOrgId, getPMOModuleName } from '../../lib/subsidiaries';
+const { storeGet, storeSet, KEYS, orgScopedKey } = require('../../lib/store');
 const axios = require('axios');
 const { getAccessToken } = require('../../lib/zohoToken');
 
-const PMO_MODULE = 'cm_payment_memos';
-async function zohoGET(path, params = {}) {
+async function zohoGET(path, params = {}, orgKey = 'rays') {
   let token = await getAccessToken();
+  const organizationId = getOrgId(orgKey);
   for (let i = 1; i <= 3; i++) {
     try {
       const res = await axios.get(`https://www.zohoapis.in/books/v3${path}`, {
         headers: { Authorization: `Zoho-oauthtoken ${token}` },
-        params: { organization_id: process.env.ZOHO_ORG_ID, ...params },
+        params: { organization_id: organizationId, ...params },
       });
       return res.data;
     } catch (e) {
@@ -34,44 +35,50 @@ async function zohoGET(path, params = {}) {
   }
 }
 
-async function deleteAICacheEntry(cacheKey) {
-  const cache = (await storeGet(KEYS.AI_COMPLIANCE_CACHE)) || {};
+async function deleteAICacheEntry(cacheKey, orgKey = 'rays') {
+  const scopedCacheKey = orgScopedKey(KEYS.AI_COMPLIANCE_CACHE, orgKey);
+  const cache = (await storeGet(scopedCacheKey)) || {};
   delete cache[cacheKey];
-  await storeSet(KEYS.AI_COMPLIANCE_CACHE, cache);
+  await storeSet(scopedCacheKey, cache);
 }
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
-  const { type, id } = req.body || {};
+  const { type, id, org } = req.body || {};
   if (!type || !id) return res.status(400).json({ error: 'type and id are required' });
+  const orgKey = org || 'rays';
+  // Real bug fixed: PMO module API name genuinely differs per
+  // organization (confirmed via live diagnostic) — Rays uses the plural
+  // form, Energy/OM use the singular form.
+  const PMO_MODULE = getPMOModuleName(orgKey);
 
   try {
     if (type === 'po') {
-      await deleteAICacheEntry(`po:${id}`);
-      const po = await getPODetail(id);
+      await deleteAICacheEntry(`po:${id}`, orgKey);
+      const po = await getPODetail(id, orgKey);
       if (!po) return res.status(404).json({ error: 'PO not found' });
-      const result = await getAIComplianceForPO(po);
+      const result = await getAIComplianceForPO(po, orgKey);
       return res.status(200).json({ success: true, results: result.results });
     }
 
     if (type === 'bill') {
-      await deleteAICacheEntry(`bill:${id}`);
-      const bill = await getBillDetail(id);
+      await deleteAICacheEntry(`bill:${id}`, orgKey);
+      const bill = await getBillDetail(id, orgKey);
       if (!bill) return res.status(404).json({ error: 'Bill not found' });
       // Best-effort linked-PO context, same as the main bills.js flow —
       // not essential for the re-check to work, just extra prompt context.
       let linkedPO = null;
       try {
         const ref = (bill.purchaseorders || [])[0];
-        if (ref?.purchaseorder_id) linkedPO = await getPODetail(ref.purchaseorder_id);
+        if (ref?.purchaseorder_id) linkedPO = await getPODetail(ref.purchaseorder_id, orgKey);
       } catch { /* best-effort only */ }
-      const result = await getAIComplianceForBill(bill, linkedPO);
+      const result = await getAIComplianceForBill(bill, linkedPO, orgKey);
       return res.status(200).json({ success: true, results: result.results });
     }
 
     if (type === 'pmo') {
-      await deleteAICacheEntry(`pmo:${id}`);
-      const det = await zohoGET(`/${PMO_MODULE}/${id}`);
+      await deleteAICacheEntry(`pmo:${id}`, orgKey);
+      const det = await zohoGET(`/${PMO_MODULE}/${id}`, {}, orgKey);
       const record = det.data?.module_record || det.module_record || det;
       const f = extractFields(record.module_fields);
       const payCategory = String(f.cf_payment_category || '');
@@ -82,7 +89,7 @@ export default async function handler(req, res) {
       // Real, confirmed (undocumented) endpoint for Supporting Attachments.
       let supportingDocs = [];
       try {
-        const attData = await zohoGET(`/${PMO_MODULE}/${id}/attachment`);
+        const attData = await zohoGET(`/${PMO_MODULE}/${id}/attachment`, {}, orgKey);
         const list = attData.documents || attData.attachments || attData.data || (Array.isArray(attData) ? attData : []);
         supportingDocs = list.map(d => ({
           document_id: d.document_id || d.attachment_id || d.file_id || d.id,
@@ -103,7 +110,7 @@ export default async function handler(req, res) {
         ],
         approvers_list: [],
       };
-      const result = await getAIComplianceForPMO(pmo);
+      const result = await getAIComplianceForPMO(pmo, orgKey);
       return res.status(200).json({ success: true, results: result.results });
     }
 
