@@ -224,8 +224,34 @@ export default async function handler(req, res) {
       }
       console.log(`[${orgKey}] PMOs: scanned ${scannedCount} records (stopped ${stoppedEarly ? 'early, hit already-known unchanged record' : 'at end of list'}), ${toFetch.length} new/changed to check`);
 
+      // Real bug fixed here — this is the actual root cause of a
+      // confirmed real production-only symptom: refreshing the PMOs tab
+      // on Vercel never picked up new PMOs no matter how many times it
+      // was retried, while local dev (unlimited execution time) always
+      // eventually succeeded. Vercel serverless functions have a hard
+      // execution time limit; local dev does not. Previously,
+      // persistStore() was only ever called ONCE, after the entire
+      // toFetch loop finished — meaning if Vercel killed the function
+      // partway through detail-fetching + AI-processing several new
+      // PMOs, ALL of that work was lost, and the next refresh attempt
+      // started completely from zero, hitting the exact same wall again
+      // — an infinite retry loop with no way to ever finish. This budget
+      // (mirroring the same proven pattern already used in
+      // lib/advanceReconcile.js) persists progress incrementally, so an
+      // interrupted run keeps whatever it managed to complete, making
+      // eventual success possible across multiple refresh attempts
+      // instead of restarting from scratch every single time.
+      const scanStartTime = Date.now();
+      const PMO_SCAN_TIME_BUDGET_MS = 90000; // leaves real headroom for the AI-processing step that still runs after this
+      let timeBudgetHit = false;
+
       if (toFetch.length > 0) {
         for (let i = 0; i < toFetch.length; i += 10) {
+          if (Date.now() - scanStartTime > PMO_SCAN_TIME_BUDGET_MS) {
+            timeBudgetHit = true;
+            console.warn(`[${orgKey}] PMOs: time budget (${PMO_SCAN_TIME_BUDGET_MS}ms) reached after ${i}/${toFetch.length} — persisting partial progress now, remaining PMOs will be picked up on the next refresh`);
+            break;
+          }
           const batch = toFetch.slice(i, i + 10);
           await Promise.all(batch.map(async r => {
             const id       = r.module_record_id;
@@ -259,11 +285,16 @@ export default async function handler(req, res) {
               else delete state.detailCache[id]; // never keep full detail for anyone else's
             } catch { /* leave unmarked — will be retried next refresh */ }
           }));
-          if (i + 10 < toFetch.length) await new Promise(r => setTimeout(r, 300));
+          // Persist incrementally after EVERY batch, not just at the
+          // very end — this is the real fix. Even a single batch's worth
+          // of progress surviving an interruption is far better than
+          // losing everything.
+          await persistStore(orgKey);
+          if (i + 10 < toFetch.length && !timeBudgetHit) await new Promise(r => setTimeout(r, 300));
         }
       }
 
-      await persistStore(orgKey);
+      if (!timeBudgetHit) await persistStore(orgKey); // final save — harmless no-op if the loop above already covered everything
 
       // detailCache only ever contains Jatin's own by construction now
       detailed = Object.values(state.detailCache);
