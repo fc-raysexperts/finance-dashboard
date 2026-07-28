@@ -202,6 +202,18 @@ export default async function handler(req, res) {
       let page = 1;
       let stoppedEarly = false;
       let scannedCount = 0;
+      // Real safety net added alongside the forceRefresh early-stop
+      // removal above: without SOME stop condition, a forced full scan
+      // would otherwise page through this org's ENTIRE PMO history
+      // (thousands of records, going back years) every single time
+      // Refresh is clicked — reintroducing the exact "scan everything"
+      // runaway cost this project already fixed once before (the
+      // original 45-minute-scan incident). A genuine date-based cutoff
+      // (anything modified more than 6 months ago is irrelevant to
+      // "currently pending approval," full stop) is a much safer stop
+      // condition than trusting a snapshot match, since it doesn't
+      // depend on any potentially-inconsistent cached state at all.
+      const relevanceCutoffDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000);
       while (true) {
         const data = await zohoGET(`/${PMO_MODULE}`, { per_page: 200, page, sort_column: 'last_modified_time', sort_order: 'D' }, orgKey);
         const recs = data.module_records || [];
@@ -210,19 +222,46 @@ export default async function handler(req, res) {
         for (const r of recs) {
           const id       = r.module_record_id;
           const modified = r.last_modified_time || '';
+          if (modified && new Date(modified) < relevanceCutoffDate) {
+            stoppedEarly = true;
+            break; // outside the relevance window entirely — a real, date-based stop, not a cache-trust shortcut
+          }
           const checked  = state.checkedSnapshot[id];
-          if (checked && checked.modified === modified && checked.v === CACHE_SCHEMA_VERSION) {
+          // Real fix: on an explicit forceRefresh, NEVER stop early based
+          // on the snapshot match — a manual Refresh click is an explicit
+          // request for a guaranteed-correct answer, so it must not rely
+          // on the same "trust the snapshot, stop at the first match"
+          // shortcut used for fast, ordinary page loads. That shortcut
+          // assumes the snapshot is perfectly consistent — an assumption
+          // that can break in a serverless environment (Vercel can run
+          // multiple separate function instances concurrently, each with
+          // its own independent in-memory state, hydrating from a shared
+          // cache at slightly different moments) in ways local dev's
+          // single continuous process never surfaces. Confirmed real
+          // symptom: a consistent, non-random gap in PMOs pending —
+          // exactly what a single incorrectly-marked record mid-scan
+          // would cause, silently discarding everything genuinely new
+          // sorted after it.
+          if (!forceRefresh && checked && checked.modified === modified && checked.v === CACHE_SCHEMA_VERSION) {
             stoppedEarly = true;
             break; // this, and everything older after it, is already known, unchanged, AND extracted with current logic
+          }
+          // On forceRefresh, still skip re-fetching a record we already
+          // have correct, unchanged detail for (no need to re-download
+          // something genuinely unchanged) — just don't let that skip
+          // stop the SCAN itself from continuing through the rest of the list.
+          if (forceRefresh && checked && checked.modified === modified && checked.v === CACHE_SCHEMA_VERSION) {
+            continue;
           }
           toFetch.push(r);
         }
 
         if (stoppedEarly || !data.page_context?.has_more_page) break;
         page++;
+        if (page > 50) break; // absolute safety cap, matching the same cap already used in lib/advanceReconcile.js
         await new Promise(r => setTimeout(r, 200));
       }
-      console.log(`[${orgKey}] PMOs: scanned ${scannedCount} records (stopped ${stoppedEarly ? 'early, hit already-known unchanged record' : 'at end of list'}), ${toFetch.length} new/changed to check`);
+      console.log(`[${orgKey}] PMOs: scanned ${scannedCount} records (stopped ${stoppedEarly ? 'early' : 'at end of list'}${forceRefresh ? ' [forceRefresh — snapshot early-stop disabled, date-cutoff-only scan guaranteed]' : ''}), ${toFetch.length} new/changed to check`);
 
       // Real bug fixed here — this is the actual root cause of a
       // confirmed real production-only symptom: refreshing the PMOs tab
