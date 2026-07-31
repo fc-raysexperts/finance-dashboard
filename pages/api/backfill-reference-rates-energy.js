@@ -36,7 +36,7 @@
 
 const axios = require('axios');
 const { getAccessToken } = require('../../lib/zohoToken');
-const { storeGet, storeSet, KEYS, orgScopedKey } = require('../../lib/store');
+const { storeGet, storeSet, storeDelete, KEYS, orgScopedKey } = require('../../lib/store');
 const { getItemGroupKey } = require('../../lib/referenceRates');
 const { getOrgId } = require('../../lib/subsidiaries');
 
@@ -117,6 +117,27 @@ export default async function handler(req, res) {
       window: `${startDate} to ${endDate || 'present'}`,
       currentCursor: cursor || 'not started yet',
       note: 'This is a status check only — no Zoho calls were made, nothing was processed.',
+    });
+  }
+
+  // One-time recovery for exactly this situation: a previous run reached
+  // 'done' using the pre-fix recording logic (before the name/description
+  // fallback existed), so it's cached as complete despite having found
+  // zero real items. Visiting once with ?reset=1 clears ONLY Energy's
+  // own cursor (for this exact date window) and Energy's own history —
+  // both already org-scoped keys, so this can never touch Rays' data —
+  // so the very next normal call starts genuinely fresh and reprocesses
+  // every document with the corrected logic. The Items catalog is left
+  // alone since it was already correct (Energy genuinely has 0 active
+  // catalog items — confirmed real, not a bug).
+  if (req.query.reset === '1') {
+    await storeDelete(cursorKey);
+    await storeSet(historyKey, {});
+    return res.status(200).json({
+      org: ORG_KEY,
+      reset: true,
+      window: `${startDate} to ${endDate || 'present'}`,
+      message: 'Cursor and history cleared for this window. Call the endpoint normally (no ?reset) to start a genuinely fresh backfill with the corrected recording logic.',
     });
   }
 
