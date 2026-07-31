@@ -89,9 +89,14 @@ export default async function handler(req, res) {
             const docNumber = doc?.[numberField];
             const docDate   = doc?.date;
             lineItems.forEach(li => {
-              const grouped = getItemGroupKey(li);
+              // Same real fix as the backfill file: Energy's real line
+              // items have name="" with the actual text in `description`
+              // instead — fall back before handing off to the shared,
+              // unmodified matching logic.
+              const withName = (li.name && li.name.trim()) ? li : { ...li, name: (li.description || '').trim() };
+              const grouped = getItemGroupKey(withName);
               if (grouped && alreadyRecorded(history, grouped.key, docNumber, docDate)) return;
-              recordOccurrence(history, li, docDate, docType, docNumber);
+              recordOccurrence(history, withName, docDate, docType, docNumber);
               newOccurrences++;
             });
           } catch { /* skip this one document, keep going */ }

@@ -66,7 +66,25 @@ async function zohoGET(path, params = {}) {
   }
 }
 
+// Real fix, found via direct diagnostic against Energy's actual data:
+// every real line item here has item_id="" AND name="" — the meaningful
+// text lives entirely in `description` instead (confirmed on both a
+// real PO and a real Bill). The shared getItemGroupKey (lib/
+// referenceRates.js, used as-is, unmodified, for Rays too) falls back
+// to `name` when item_id is empty, and simply gives up when THAT'S also
+// empty — which is exactly why the first real backfill run processed
+// all 21 documents without error yet recorded zero items. Rather than
+// touch the shared file Rays' working system depends on, this fallback
+// lives ONLY here: treat `description` as the effective name whenever
+// `name` is genuinely blank, before handing the line item to the
+// shared, unmodified matching logic.
+function withNameFallback(lineItem) {
+  if (lineItem.name && lineItem.name.trim()) return lineItem;
+  return { ...lineItem, name: (lineItem.description || '').trim() };
+}
+
 function recordOccurrence(history, lineItem, date, source, docNumber) {
+  lineItem = withNameFallback(lineItem);
   const grouped = getItemGroupKey(lineItem);
   if (!grouped) return;
   const key = grouped.key;
