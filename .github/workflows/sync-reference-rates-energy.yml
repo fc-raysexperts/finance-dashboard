@@ -1,0 +1,23 @@
+name: Sync Reference Rates (Energy)
+
+# Deliberately a SEPARATE workflow from "Sync Reference Rates" (Rays) —
+# calls /api/sync-reference-rates-energy specifically, which is already
+# its own org-scoped endpoint with its own storage keys, so this can
+# never touch or interfere with Rays' sync in any way. Same schedule
+# (every 6 hours) as the Rays workflow, for consistency.
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours, at minute 0
+  workflow_dispatch:         # also lets you trigger it manually from GitHub's Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the Energy Reference Rate sync endpoint
+        run: |
+          curl -s "https://finance-dashboard-liard-three.vercel.app/api/sync-reference-rates-energy?key=check123" \
+            -o response.json
+          cat response.json
+          echo ""
+          echo "Energy sync complete."
