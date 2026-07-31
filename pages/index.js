@@ -1703,7 +1703,7 @@ function Attachments({ docs, onPreview, title }) {
 }
 
 // ----- DETAIL MODAL (PO / BILL / PMO) -----
-function DetailModal({ item, type, orgKey, onClose, onRecheckDone }) {
+function DetailModal({ item, type, orgKey, pfbCandidates, onClose, onRecheckDone }) {
   const isBill = type === 'bill', isPMO = type === 'pmo';
   const [fullTextView, setFullTextView] = useState(null); // {label, text} - only used for genuinely long Notes/Terms that would take up too much of the popup inline
   const [attachmentPreview, setAttachmentPreview] = useState(null); // {name, docType, docId} - opens a nested modal with the real PDF embedded
@@ -1927,6 +1927,15 @@ function DetailModal({ item, type, orgKey, onClose, onRecheckDone }) {
       {isBill && item.poLineChecks && item.poLineChecks.length>0 && <POMatchTable checks={item.poLineChecks} title="PO Match - Line by Line"/>}
       {!isPMO && <ReferenceRateTable checks={item.referenceRateChecks}/>}
       {isPMO && item.alignment && item.alignment.checks && item.alignment.checks.length>0 && <CompTable checks={item.alignment.checks} title="PI / Bill Alignment"/>}
+      {orgKey === 'energy' && item.pfbMatch && item.pfbMatch.length > 0 && (
+        <RVUNLPFBMatchTable
+          pfbMatch={item.pfbMatch}
+          pbpType={type}
+          pbpId={item.id}
+          candidates={pfbCandidates || []}
+          onResolved={onRecheckDone}
+        />
+      )}
       {isPMO ? (
         <>
           <Attachments docs={item.piBillDocs && item.piBillDocs.length > 0 ? item.piBillDocs : null} onPreview={setAttachmentPreview} title="PI/Bill Attachment"/>
@@ -2107,6 +2116,570 @@ function SearchResultModal({ type, id, orgKey, onClose }) {
   );
 }
 
+// RVUNLBudgetTab — the Energy subsidiary's PFBs Tab. Reads the budget
+// served by /api/pfb-energy-rvunl (backed by lib/pfb/energyRVUNL.js).
+// Completely separate from the existing Solar Parks PFB flow above —
+// shares no state, no components, no code path with it.
+const RVUNL_CATEGORY_STYLE = {
+  bessCost:            { color: '#0284c7', bg: '#e0f2fe', icon: '\u{1F50B}' },
+  pcsCost:              { color: '#7c3aed', bg: '#ede9fe', icon: '\u26A1' },
+  electricalBOM:        { color: '#ca8a04', bg: '#fef9c3', icon: '\u{1F50C}' },
+  buildingAndCivil:      { color: '#059669', bg: '#d1fae5', icon: '\u{1F3D7}\uFE0F' },
+  installationUptoPSS:   { color: '#dc2626', bg: '#fee2e2', icon: '\u{1F527}' },
+  pss:                   { color: '#db2777', bg: '#fce7f3', icon: '\u{1F5FC}' },
+  bayGSS220kV:           { color: '#ea580c', bg: '#ffedd5', icon: '\u{1F4E1}' },
+};
+
+function RVUNLBudgetTab({ data, loading, openCategory, onOpenCategory }) {
+  const inr = function(n){ return n==null ? '—' : '\u20b9' + Math.round(n).toLocaleString('en-IN'); };
+
+  if (loading) return <Spinner label="Loading RVUNL budget..."/>;
+  if (!data) return (
+    <div style={{background:'#fff',borderRadius:12,border:'1px solid #e2e8f0',padding:'48px',textAlign:'center'}}>
+      <div style={{fontSize:15.5,fontWeight:600,color:'#64748b'}}>Could not load the project budget.</div>
+    </div>
+  );
+
+  const { project, summary, components } = data;
+
+  const CATEGORY_TO_COMPONENT_KEY = {
+    'DC System - BESS with EMS': 'bessCost',
+    'PCS': 'pcsCost',
+    'Electrical BoM': 'electricalBOM',
+    'Building and civil works': 'buildingAndCivil',
+    'Installation & Commissioning upto PSS': 'installationUptoPSS',
+    'PSS & TL upto bay works': 'pss',
+    '220kV Bay works': 'bayGSS220kV',
+  };
+
+  if (openCategory) {
+    return (
+      <RVUNLCategoryDetail
+        componentKey={openCategory}
+        components={components}
+        onBack={function(){ onOpenCategory(null); }}
+      />
+    );
+  }
+
+  return (
+    <div className="fade">
+      <div style={{background:'linear-gradient(135deg,#1d4ed8,#0ea5e9)',borderRadius:14,padding:'20px 24px',marginBottom:18,color:'#fff',boxShadow:'0 4px 16px rgba(29,78,216,0.25)'}}>
+        <div style={{fontWeight:800,fontSize:17,marginBottom:10}}>{project.name}</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',rowGap:8,columnGap:22,fontSize:13.5,opacity:0.95}}>
+          <span><b>Location:</b> {project.location}</span>
+          <span><b>Developer:</b> {project.developer}</span>
+          <span><b>Bidding Capacity:</b> {project.biddingCapacity}</span>
+          <span><b>Design Capacity:</b> {project.designCapacityMW} MW / {project.designCapacityMWh} MWh</span>
+        </div>
+      </div>
+
+      <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,overflow:'hidden',boxShadow:'0 2px 8px rgba(0,0,0,0.06)'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:14}}>
+          <thead>
+            <tr style={{background:'#f1f5f9',borderBottom:'2px solid #e2e8f0'}}>
+              <th style={{textAlign:'left',padding:'11px 16px',color:'#475569',fontWeight:800,fontSize:12,letterSpacing:'0.03em'}}>#</th>
+              <th style={{textAlign:'left',padding:'11px 16px',color:'#475569',fontWeight:800,fontSize:12,letterSpacing:'0.03em'}}>Description</th>
+              <th style={{textAlign:'right',padding:'11px 16px',color:'#475569',fontWeight:800,fontSize:12,letterSpacing:'0.03em',whiteSpace:'nowrap'}}>Value</th>
+              <th style={{textAlign:'right',padding:'11px 16px',color:'#475569',fontWeight:800,fontSize:12,letterSpacing:'0.03em',whiteSpace:'nowrap'}}>GST</th>
+              <th style={{textAlign:'right',padding:'11px 16px',color:'#475569',fontWeight:800,fontSize:12,letterSpacing:'0.03em',whiteSpace:'nowrap'}}>Value (incl. GST)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.costLines.map(function(line){
+              const componentKey = CATEGORY_TO_COMPONENT_KEY[line.description];
+              const style = componentKey ? RVUNL_CATEGORY_STYLE[componentKey] : null;
+              return (
+                <tr key={line.no} onClick={function(){ if (componentKey) onOpenCategory(componentKey); }}
+                  style={{borderBottom:'1px solid #f1f5f9',cursor:componentKey?'pointer':'default'}}
+                  onMouseEnter={function(e){ if(componentKey) e.currentTarget.style.background=style.bg; }}
+                  onMouseLeave={function(e){ e.currentTarget.style.background='transparent'; }}>
+                  <td style={{padding:'12px 16px',color:'#94a3b8',fontWeight:600}}>{line.no}</td>
+                  <td style={{padding:'12px 16px',fontWeight:700,color:'#0f172a'}}>
+                    {style && <span style={{marginRight:7,fontSize:14.5}}>{style.icon}</span>}
+                    {line.description}
+                    {componentKey && <span style={{marginLeft:9,fontSize:12,fontWeight:700,color:style.color}}>{'\u2192 view items'}</span>}
+                  </td>
+                  <td style={{padding:'12px 16px',textAlign:'right',color:'#475569',fontWeight:600,whiteSpace:'nowrap'}}>{inr(line.value)}</td>
+                  <td style={{padding:'12px 16px',textAlign:'right',color:'#475569',fontWeight:600,whiteSpace:'nowrap'}}>{inr(line.gst)}</td>
+                  <td style={{padding:'12px 16px',textAlign:'right',fontWeight:800,color:'#0f172a',whiteSpace:'nowrap'}}>{inr(line.valueInclGST)}</td>
+                </tr>
+              );
+            })}
+            <tr style={{background:'#f8fafc',borderTop:'2px solid #cbd5e1',borderBottom:'1px solid #e2e8f0'}}>
+              <td colSpan={2} style={{padding:'12px 16px',fontWeight:800,color:'#0f172a',fontSize:14.5}}>Sub Total – A</td>
+              <td style={{padding:'12px 16px',textAlign:'right',fontWeight:700,color:'#334155',whiteSpace:'nowrap'}}>{inr(summary.subTotalA.value)}</td>
+              <td style={{padding:'12px 16px',textAlign:'right',fontWeight:700,color:'#334155',whiteSpace:'nowrap'}}>{inr(summary.subTotalA.gst)}</td>
+              <td style={{padding:'12px 16px',textAlign:'right',fontWeight:800,color:'#0f172a',whiteSpace:'nowrap'}}>{inr(summary.subTotalA.valueInclGST)}</td>
+            </tr>
+            <tr style={{borderBottom:'1px solid #f1f5f9'}}>
+              <td style={{padding:'11px 16px',color:'#94a3b8',fontWeight:600}}>{summary.landCost.no}</td>
+              <td style={{padding:'11px 16px',color:'#475569',fontWeight:600}}>Land Cost</td>
+              <td style={{padding:'11px 16px',textAlign:'right',color:'#94a3b8',fontSize:13,fontStyle:'italic'}}>{summary.landCost.note}</td>
+              <td></td>
+              <td style={{padding:'11px 16px',textAlign:'right',color:'#475569',fontWeight:600,whiteSpace:'nowrap'}}>{inr(summary.landCost.valueInclGST)}</td>
+            </tr>
+            {summary.softCosts.map(function(sc){
+              return (
+                <tr key={sc.no} style={{borderBottom:'1px solid #f1f5f9'}}>
+                  <td style={{padding:'11px 16px',color:'#94a3b8',fontWeight:600}}>{sc.no}</td>
+                  <td style={{padding:'11px 16px',color:'#475569',fontWeight:600}}>{sc.description}</td>
+                  <td style={{padding:'11px 16px',textAlign:'right',color:'#94a3b8',fontSize:13,fontStyle:'italic'}}>{sc.note}</td>
+                  <td></td>
+                  <td style={{padding:'11px 16px',textAlign:'right',color:'#475569',fontWeight:600,whiteSpace:'nowrap'}}>{inr(sc.valueInclGST)}</td>
+                </tr>
+              );
+            })}
+            <tr style={{background:'#f8fafc',borderTop:'2px solid #cbd5e1',borderBottom:'1px solid #e2e8f0'}}>
+              <td colSpan={4} style={{padding:'12px 16px',fontWeight:800,color:'#0f172a',fontSize:14.5}}>Sub Total – B</td>
+              <td style={{padding:'12px 16px',textAlign:'right',fontWeight:800,color:'#0f172a',whiteSpace:'nowrap'}}>{inr(summary.subTotalB.valueInclGST)}</td>
+            </tr>
+            <tr style={{background:'linear-gradient(135deg,#eff6ff,#e0f2fe)'}}>
+              <td colSpan={4} style={{padding:'16px',fontWeight:800,fontSize:16,color:'#1d4ed8'}}>{'\u{1F4B0}'} Total Project Cost (A+B)</td>
+              <td style={{padding:'16px',textAlign:'right',fontWeight:800,fontSize:17,color:'#1d4ed8',whiteSpace:'nowrap'}}>{inr(summary.totalProjectCost)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// RVUNLCategoryDetail — the line-item drill-down for one of the 7
+// categories. Per-column widths are DELIBERATELY the same across every
+// table within the same category (e.g. both PSS tables, all 4 Electrical
+// BoM groups, all 16 220kV category groups share identical widths), so
+// switching between tables doesn't feel like the columns are jumping
+// around. Numeric columns never wrap to 2 lines regardless of value
+// size (a Crore figure stays on one line). Vertical dividing lines (a
+// right border) appear at the specific points requested per category.
+// InfoIcon — a real hover tooltip built with actual React state, not the
+// native `title` attribute (which wasn't reliably appearing on hover).
+function InfoIcon({ note }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span style={{position:'relative',display:'inline-block',marginLeft:6}}
+      onMouseEnter={function(){ setShow(true); }}
+      onMouseLeave={function(){ setShow(false); }}>
+      <span style={{cursor:'help',color:'#0ea5e9',fontSize:14}}>{'\u{1F6C8}'}</span>
+      {show && (
+        <div style={{position:'absolute',bottom:'130%',left:0,background:'#0f172a',color:'#fff',padding:'8px 12px',borderRadius:8,fontSize:12.5,fontWeight:500,width:240,whiteSpace:'normal',zIndex:50,boxShadow:'0 4px 12px rgba(0,0,0,0.25)'}}>
+          {note}
+        </div>
+      )}
+    </span>
+  );
+}
+
+// RVUNLPFBMatchTable — shows how each of a PBP's real line items matched
+// against the RVUNL budget (Budget vs Actual vs Variance), and lets the
+// user manually resolve anything neither Layer 1 nor AI could confidently
+// match (Layer 4 — the final fallback).
+function RVUNLPFBMatchTable({ pfbMatch, pbpType, pbpId, candidates, onResolved }) {
+  const inr = function(n){ return n==null ? '—' : '\u20b9' + Math.round(n).toLocaleString('en-IN'); };
+  const [pickerOpenFor, setPickerOpenFor] = useState(null); // lineItemName currently being manually resolved
+  const [pickCategory, setPickCategory] = useState('');
+  const [pickItemName, setPickItemName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+
+  const categoryOptions = [...new Set(candidates.map(c => c.category))];
+  const categoryLabelFor = function(cat){ const found = candidates.find(c => c.category === cat); return found ? found.categoryLabel : cat; };
+  const itemOptionsForCategory = pickCategory
+    ? [...new Set(candidates.filter(c => c.category === pickCategory).map(c => c.itemName))]
+    : [];
+
+  async function saveManualPick(lineItemName) {
+    if (!pickCategory || !pickItemName) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const r = await fetch('/api/pfb-match-manual-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pbpType, pbpId,
+          lineItemDescription: lineItemName,
+          category: pickCategory,
+          itemName: pickItemName,
+        }),
+      });
+      const d = await r.json();
+      if (!d.success) { setSaveError(d.error || 'Could not save this match'); setSaving(false); return; }
+      setPickerOpenFor(null);
+      setPickCategory('');
+      setPickItemName('');
+      setSaving(false);
+      if (onResolved) onResolved();
+    } catch (e) {
+      setSaveError(e.message);
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{marginBottom:20}}>
+      <h3 style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:8}}>PFB Match — RVUNL Budget Comparison</h3>
+      <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:10,overflow:'hidden'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+          <thead>
+            <tr style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0'}}>
+              <th style={{textAlign:'left',padding:'8px 12px',color:'#64748b',fontWeight:700,fontSize:11}}>Line Item</th>
+              <th style={{textAlign:'left',padding:'8px 12px',color:'#64748b',fontWeight:700,fontSize:11}}>Matched To</th>
+              <th style={{textAlign:'right',padding:'8px 12px',color:'#64748b',fontWeight:700,fontSize:11,whiteSpace:'nowrap'}}>Budget</th>
+              <th style={{textAlign:'right',padding:'8px 12px',color:'#64748b',fontWeight:700,fontSize:11,whiteSpace:'nowrap'}}>Actual</th>
+              <th style={{textAlign:'right',padding:'8px 12px',color:'#64748b',fontWeight:700,fontSize:11,whiteSpace:'nowrap'}}>Variance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pfbMatch.map(function(m, i){
+              const overBudget = m.matched && m.variance > 0;
+              return (
+                <Fragment key={i}>
+                  <tr style={{borderBottom:'1px solid #f1f5f9'}}>
+                    <td style={{padding:'8px 12px',color:'#334155'}}>{m.lineItemName}</td>
+                    <td style={{padding:'8px 12px'}}>
+                      {m.matched ? (
+                        <div>
+                          <div style={{fontWeight:600,color:'#0f172a'}}>{m.itemName}</div>
+                          <div style={{fontSize:11,color:'#94a3b8'}}>{m.categoryLabel} {'\u2022'} via {m.method}</div>
+                          {m.isLotSubItem && m.lotInfo && (
+                            <div style={{fontSize:11,color:'#7c3aed',marginTop:2}}>
+                              Part of "{m.lotInfo.parentLotName}" lot — {inr(m.lotInfo.spentSoFar)} of {inr(m.lotInfo.allocatedShare)} spent so far
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div>
+                          <span style={{color:'#dc2626',fontWeight:600,fontSize:12.5}}>Unmatched</span>
+                          {m.reasoning && <div style={{fontSize:11,color:'#94a3b8'}}>{m.reasoning}</div>}
+                          <button onClick={function(){ setPickerOpenFor(pickerOpenFor===m.lineItemName?null:m.lineItemName); setSaveError(null); }}
+                            style={{marginTop:4,background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe',borderRadius:6,padding:'3px 10px',fontSize:11.5,fontWeight:600,cursor:'pointer'}}>
+                            {pickerOpenFor===m.lineItemName ? 'Cancel' : 'Pick match manually'}
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                    <td style={{padding:'8px 12px',textAlign:'right',color:'#475569',whiteSpace:'nowrap'}}>{m.matched ? inr(m.budgetAmount) : '—'}</td>
+                    <td style={{padding:'8px 12px',textAlign:'right',color:'#475569',whiteSpace:'nowrap'}}>{inr(m.actualAmount)}</td>
+                    <td style={{padding:'8px 12px',textAlign:'right',fontWeight:700,whiteSpace:'nowrap',color:!m.matched?'#94a3b8':overBudget?'#dc2626':'#15803d'}}>
+                      {m.matched ? (overBudget?'+':'') + inr(m.variance) : '—'}
+                    </td>
+                  </tr>
+                  {pickerOpenFor === m.lineItemName && (
+                    <tr style={{background:'#f8fafc',borderBottom:'1px solid #f1f5f9'}}>
+                      <td colSpan={5} style={{padding:'10px 12px'}}>
+                        <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+                          <select value={pickCategory} onChange={function(e){ setPickCategory(e.target.value); setPickItemName(''); }}
+                            style={{padding:'6px 10px',borderRadius:6,border:'1px solid #cbd5e1',fontSize:12.5}}>
+                            <option value="">Select Component...</option>
+                            {categoryOptions.map(function(c){ return <option key={c} value={c}>{categoryLabelFor(c)}</option>; })}
+                          </select>
+                          <select value={pickItemName} onChange={function(e){ setPickItemName(e.target.value); }} disabled={!pickCategory}
+                            style={{padding:'6px 10px',borderRadius:6,border:'1px solid #cbd5e1',fontSize:12.5,minWidth:200}}>
+                            <option value="">Select Item...</option>
+                            {itemOptionsForCategory.map(function(it){ return <option key={it} value={it}>{it}</option>; })}
+                          </select>
+                          <button onClick={function(){ saveManualPick(m.lineItemName); }} disabled={!pickCategory || !pickItemName || saving}
+                            style={{background:'#1d4ed8',color:'#fff',border:'none',borderRadius:6,padding:'6px 14px',fontSize:12.5,fontWeight:600,cursor:(!pickCategory||!pickItemName||saving)?'not-allowed':'pointer',opacity:(!pickCategory||!pickItemName||saving)?0.5:1}}>
+                            {saving ? 'Saving...' : 'Save Match'}
+                          </button>
+                          {saveError && <span style={{color:'#dc2626',fontSize:12}}>{saveError}</span>}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function RVUNLCategoryDetail({ componentKey, components, onBack }) {
+  const inr = function(n){ return n==null ? '—' : '\u20b9' + Math.round(n).toLocaleString('en-IN'); };
+  const style = RVUNL_CATEGORY_STYLE[componentKey] || { color:'#1d4ed8', bg:'#eff6ff', icon:'\u{1F4CB}' };
+
+  const BackButton = (
+    <button onClick={onBack} style={{background:'#f1f5f9',color:'#334155',border:'1px solid #cbd5e1',borderRadius:8,padding:'7px 15px',cursor:'pointer',fontSize:13.5,fontWeight:700,marginBottom:15}}>
+      {'\u2190 Back to Summary'}
+    </button>
+  );
+
+  function CategoryHeader(title, subtitle) {
+    return (
+      <div style={{background:style.bg,borderRadius:12,padding:'14px 18px',marginBottom:15,borderLeft:`5px solid ${style.color}`}}>
+        <div style={{fontWeight:800,fontSize:16.5,color:style.color}}>{style.icon} {title}</div>
+        {subtitle && <div style={{fontSize:12.5,color:'#64748b',marginTop:3}}>{subtitle}</div>}
+      </div>
+    );
+  }
+
+  // columns: [{key,label,align,money,width,nowrap,vdl,render}]
+  // vdl:true adds a right border AFTER that column (a vertical dividing line)
+  function LineItemTable(items, columns) {
+    return (
+      <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,overflowX:'auto',boxShadow:'0 2px 6px rgba(0,0,0,0.05)'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13.5,tableLayout:'auto'}}>
+          <thead>
+            <tr style={{background:'#f8fafc',borderBottom:'2px solid #e2e8f0'}}>
+              {columns.map(function(c){
+                return <th key={c.key} style={{textAlign:c.align||'left',padding:'10px 14px',color:'#475569',fontWeight:800,fontSize:11.5,letterSpacing:'0.02em',whiteSpace:c.nowrap?'nowrap':'normal',width:c.width,borderRight:c.vdl?'2px solid #cbd5e1':'none'}}>{c.label}</th>;
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {items.map(function(item, i){
+              return (
+                <tr key={i} style={{borderBottom:'1px solid #f1f5f9',background:i%2?'#fafbfc':'#fff'}}>
+                  {columns.map(function(c){
+                    return <td key={c.key} style={{padding:'10px 14px',textAlign:c.align||'left',color:c.key==='total'?'#0f172a':'#334155',fontWeight:c.key==='total'?800:500,whiteSpace:c.nowrap?'nowrap':'normal',wordBreak:c.nowrap?'normal':'break-word',width:c.width,borderRight:c.vdl?'2px solid #f1f5f9':'none'}}>
+                      {c.render ? c.render(item[c.key], item) : (item[c.key]==null ? '—' : (c.money ? inr(item[c.key]) : item[c.key]))}
+                    </td>;
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  // Full-width totals bar — real estate spread left-to-right, not
+  // clustered in a corner. Used for a table's own subtotal (smaller,
+  // inline with the table it belongs to) or the final grand total for
+  // categories with several tables (styled bigger, its own section).
+  function TotalsBar(parts, big) {
+    return (
+      <div style={{marginTop:big?18:10,background:big?style.bg:'#f8fafc',border:big?`2px solid ${style.color}33`:'1px solid #e2e8f0',borderRadius:10,padding:big?'16px 22px':'10px 16px',display:'flex',flexWrap:'wrap',justifyContent:parts.length>1?'space-between':'flex-end',gap:16,fontSize:big?15:13.5}}>
+        {parts.map(function(p, i){
+          return <span key={i} style={{color:'#334155'}}>{p.label}: <b style={{color:style.color,fontSize:big?17:14.5}}>{p.value}</b></span>;
+        })}
+      </div>
+    );
+  }
+
+  const DESC_W = 340; // consistent, slightly narrower Description width across every table
+
+  if (componentKey === 'bessCost') {
+    const d = components.bessCost;
+    return (
+      <div className="fade">
+        {BackButton}
+        {CategoryHeader('DC System – BESS with EMS', d.overallDCCapacityMWh + ' MWh overall DC capacity')}
+        {LineItemTable(d.items, [
+          { key:'itemCode', label:'Item Code', width:90 },
+          { key:'itemName', label:'Item Name', width:100 },
+          { key:'description', label:'Description', width:DESC_W, vdl:true },
+          { key:'uom', label:'UOM', align:'center', nowrap:true, width:60 },
+          { key:'quantity', label:'Qty', align:'right', nowrap:true, width:60, render:function(v){ return v==null?'—':(typeof v==='number'?v.toFixed(2):v); } },
+          { key:'unitRateINR', label:'Unit Rate', align:'right', money:true, nowrap:true, width:130 },
+          { key:'customDuty', label:'Custom Duty', align:'right', nowrap:true, width:90, render:function(v){ return v==null?'—':(v*100).toFixed(0)+'%'; } },
+          { key:'otherCost', label:'Other Cost', align:'right', money:true, nowrap:true, width:112, vdl:true },
+          { key:'baseAmount', label:'Base Amount', align:'right', money:true, nowrap:true, width:140 },
+          { key:'gst', label:'GST', align:'right', money:true, nowrap:true, width:130 },
+          { key:'total', label:'Total', align:'right', money:true, nowrap:true, width:140 },
+        ])}
+        {TotalsBar([
+          { label:'Total Base Amount', value:inr(d.totalBaseAmount) },
+          { label:'Total GST', value:inr(d.totalGST) },
+          { label:'Grand Total', value:inr(d.total) },
+        ])}
+        {TotalsBar([
+          { label:'Cost/MWh — Base Amount', value:inr(d.costPerMWh.baseAmount) },
+          { label:'Cost/MWh — GST', value:inr(d.costPerMWh.gst) },
+          { label:'Cost/MWh — Total', value:inr(d.costPerMWh.total) },
+        ])}
+      </div>
+    );
+  }
+
+  if (componentKey === 'pcsCost') {
+    const d = components.pcsCost;
+    return (
+      <div className="fade">
+        {BackButton}
+        {CategoryHeader('PCS (Power Conversion System)', d.note)}
+        <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,padding:22,boxShadow:'0 2px 6px rgba(0,0,0,0.05)'}}>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:16,fontSize:14}}>
+            <div><div style={{color:'#94a3b8',fontSize:12,fontWeight:600}}>Design Capacity</div><div style={{fontWeight:800,fontSize:16.5}}>{d.designCapacityMW} MW</div></div>
+            <div><div style={{color:'#94a3b8',fontSize:12,fontWeight:600}}>Rate per MW</div><div style={{fontWeight:800,fontSize:16.5}}>{inr(d.ratePerMW)}</div></div>
+            <div><div style={{color:'#94a3b8',fontSize:12,fontWeight:600}}>Base Amount</div><div style={{fontWeight:800,fontSize:16.5}}>{inr(d.baseAmount)}</div></div>
+            <div><div style={{color:'#94a3b8',fontSize:12,fontWeight:600}}>GST ({(d.gstRate*100)}%)</div><div style={{fontWeight:800,fontSize:16.5}}>{inr(d.gst)}</div></div>
+            <div><div style={{color:'#94a3b8',fontSize:12,fontWeight:600}}>Total</div><div style={{fontWeight:800,fontSize:18,color:style.color}}>{inr(d.total)}</div></div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (componentKey === 'electricalBOM') {
+    const d = components.electricalBOM;
+    const grouped = d.groups.map(function(g){ return { group: g, items: d.items.filter(function(i){ return i.group === g; }) }; });
+    const cols = [
+      { key:'itemName', label:'Item', width:150 },
+      { key:'description', label:'Description', width:DESC_W, vdl:true, render:function(v, item){
+        if (!item.subItems) return v;
+        const allLines = [v, ...item.subItems];
+        return (
+          <div>
+            {allLines.map(function(line, idx){ return <div key={idx} style={{marginTop:idx>0?4:0}}>{line}</div>; })}
+          </div>
+        );
+      }},
+      { key:'qty', label:'Qty', align:'right', nowrap:true, width:80 },
+      { key:'unit', label:'Unit', align:'center', nowrap:true, width:70 },
+      { key:'costPerNos', label:'Rate', align:'right', money:true, nowrap:true, width:120 },
+      { key:'total', label:'Total', align:'right', money:true, nowrap:true, width:130 },
+    ];
+    return (
+      <div className="fade">
+        {BackButton}
+        {CategoryHeader('Electrical BoM', 'Grouped into the ' + d.groups.length + ' real groupings this sheet actually has — useful later to know which grouping a new item likely falls under.')}
+        {grouped.map(function(g){
+          const groupTotal = g.items.reduce(function(s,i){ return s + (i.total||0); }, 0);
+          return (
+            <div key={g.group} style={{marginBottom:20}}>
+              <div style={{fontWeight:800,fontSize:14.5,color:'#334155',marginBottom:9}}>{g.group}</div>
+              {LineItemTable(g.items, cols)}
+              {TotalsBar([{ label:g.group + ' Total', value:inr(groupTotal) }])}
+            </div>
+          );
+        })}
+        {TotalsBar([{ label:'Grand Total (Electrical BoM)', value:inr(d.netTotal) }], true)}
+      </div>
+    );
+  }
+
+  if (componentKey === 'buildingAndCivil') {
+    const d = components.buildingAndCivil;
+    return (
+      <div className="fade">
+        {BackButton}
+        {CategoryHeader('Building and Civil Works', 'Overall site area: ' + d.overallSiteAreaAcres + ' Acres')}
+        {LineItemTable(d.items, [
+          { key:'itemName', label:'Item', width:170 },
+          { key:'description', label:'Description', width:DESC_W, vdl:true, render:function(v, item){
+            return <span>{v}{item.note && <InfoIcon note={item.note}/>}</span>;
+          }},
+          { key:'unit', label:'Unit', align:'center', nowrap:true, width:70 },
+          { key:'qty', label:'Qty', align:'right', nowrap:true, width:80 },
+          { key:'unitRate', label:'Rate', align:'right', money:true, nowrap:true, width:120 },
+          { key:'total', label:'Total', align:'right', money:true, nowrap:true, width:130 },
+        ])}
+        {TotalsBar([{ label:'Total', value:inr(d.totalCost) }])}
+      </div>
+    );
+  }
+
+  if (componentKey === 'installationUptoPSS') {
+    const d = components.installationUptoPSS;
+    return (
+      <div className="fade">
+        {BackButton}
+        {CategoryHeader('Installation & Commissioning upto PSS')}
+        {LineItemTable(d.items, [
+          { key:'group', label:'Group', width:110 },
+          { key:'itemName', label:'Item', width:190, vdl:true },
+          { key:'unit', label:'Unit', align:'center', nowrap:true, width:70 },
+          { key:'qty', label:'Qty', align:'right', nowrap:true, width:70 },
+          { key:'costPerNos', label:'Rate', align:'right', money:true, nowrap:true, width:105, vdl:true },
+          { key:'total', label:'Total (excl. GST)', align:'right', money:true, nowrap:true, width:140 },
+          { key:'gst', label:'GST', align:'right', money:true, nowrap:true, width:120 },
+          { key:'totalWithGST', label:'Total (incl. GST)', align:'right', money:true, nowrap:true, width:140 },
+        ])}
+        {TotalsBar([
+          { label:'Total (excl. GST)', value:inr(d.totalCost) },
+          { label:'GST', value:inr(d.totalGST) },
+          { label:'Total (incl. GST)', value:inr(d.totalWithGST) },
+        ])}
+      </div>
+    );
+  }
+
+  if (componentKey === 'pss') {
+    const d = components.pss;
+    const cols = [
+      { key:'itemName', label:'Item', width:150 },
+      { key:'description', label:'Description', width:DESC_W, vdl:true },
+      { key:'qty', label:'Qty', align:'right', nowrap:true, width:70 },
+      { key:'unit', label:'Unit', align:'center', nowrap:true, width:70 },
+      { key:'costPerNos', label:'Rate', align:'right', money:true, nowrap:true, width:120 },
+      { key:'total', label:'Total', align:'right', money:true, nowrap:true, width:130 },
+    ];
+    return (
+      <div className="fade">
+        {BackButton}
+        {CategoryHeader('PSS & TL upto bay works')}
+        <div style={{fontSize:12.5,color:'#92400e',background:'#fffbeb',border:'1.5px solid #fde68a',borderRadius:10,padding:'10px 15px',marginBottom:16,fontWeight:600}}>{'\u26A0\uFE0F'} {d.costShareNote}</div>
+
+        <div style={{fontWeight:800,fontSize:14.5,color:'#334155',marginBottom:9}}>PSS-Specific Equipment (100% RPE Energy Reserve cost)</div>
+        {LineItemTable(d.pssSpecificItems, cols)}
+        {TotalsBar([{ label:'PSS-Specific Total', value:inr(d.pssSpecificTotal) }])}
+
+        <div style={{fontWeight:800,fontSize:14.5,color:'#334155',margin:'20px 0 9px'}}>Common Pooling (shared infrastructure — 60% cost-share)</div>
+        {LineItemTable(d.commonPoolingItems, cols.map(function(c){ return c.key==='total' ? Object.assign({},c,{label:'Total (100%)'}) : c; }))}
+        {TotalsBar([
+          { label:'Common Pooling Sub Total (100%)', value:inr(d.commonPoolingSubTotal) },
+          { label:"RPE Energy Reserve's 60% Share", value:inr(d.raysCommonPoolingShare) },
+        ])}
+
+        {TotalsBar([{ label:'Net Total', value:inr(d.netTotal) }], true)}
+      </div>
+    );
+  }
+
+  if (componentKey === 'bayGSS220kV') {
+    const d = components.bayGSS220kV;
+    const grouped = [];
+    d.items.forEach(function(item){
+      let group = grouped.find(function(g){ return g.category === item.category; });
+      if (!group) { group = { category: item.category, items: [] }; grouped.push(group); }
+      group.items.push(item);
+    });
+    const cols = [
+      { key:'itemName', label:'Item (derived)', width:170 },
+      { key:'description', label:'Description (original)', width:DESC_W, vdl:true },
+      { key:'unit', label:'Unit', align:'center', nowrap:true, width:70 },
+      { key:'qty', label:'Qty', align:'right', nowrap:true, width:70 },
+      { key:'unitPrice', label:'Unit Price', align:'right', money:true, nowrap:true, width:120 },
+      { key:'total', label:'Total (100%)', align:'right', money:true, nowrap:true, width:130 },
+    ];
+    return (
+      <div className="fade">
+        {BackButton}
+        {CategoryHeader('220kV Bay Works')}
+        <div style={{fontSize:12.5,color:'#92400e',background:'#fffbeb',border:'1.5px solid #fde68a',borderRadius:10,padding:'10px 15px',marginBottom:8,fontWeight:600}}>{'\u26A0\uFE0F'} {d.costShareNote}</div>
+        {d.itemNamesAreDerived && (
+          <div style={{fontSize:12,color:'#94a3b8',marginBottom:15,fontStyle:'italic'}}>Note: Item Names here are derived from the original spec descriptions (this sheet uniquely has no short item-name field of its own) — the full original Description is shown alongside.</div>
+        )}
+        {grouped.map(function(g){
+          const groupTotal = g.items.reduce(function(s,i){ return s + (i.total||0); }, 0);
+          return (
+            <div key={g.category} style={{marginBottom:18}}>
+              <div style={{fontWeight:800,fontSize:14.5,color:'#334155',marginBottom:9}}>{g.category}</div>
+              {LineItemTable(g.items, cols)}
+              {TotalsBar([{ label:g.category + ' Total (100%)', value:inr(groupTotal) }])}
+            </div>
+          );
+        })}
+        {TotalsBar([
+          { label:'Sub Total (100%)', value:inr(d.subTotal) },
+          { label:"RPE Energy Reserve's 60% Share", value:inr(d.total) },
+        ], true)}
+      </div>
+    );
+  }
+
+  return BackButton;
+}
+
+
+
 
 // Replaces the old middleware.js/proxy.js approach. Next.js 16 renamed the
 // middleware file convention to "proxy.js", and that rename runs into a
@@ -2161,7 +2734,7 @@ export default function Dashboard() {
   const [firms,        setFirms]      = useState([]);
   const [parks,        setParks]      = useState([]);
   const [pfbCache,     setPFBCache]   = useState({});
-  const [loading,      setLoading]    = useState({pos:true,bills:true,pmos:true,projects:true});
+  const [loading,      setLoading]    = useState({pos:true,bills:true,pmos:true,projects:true,rvunlBudget:true});
   const [selected,     setSelected]   = useState(null);
   const [pfbFlow,      setPFBFlow]    = useState(null);
   const [projDetail,   setProjDetail] = useState(null);
@@ -2181,6 +2754,8 @@ export default function Dashboard() {
   const [selectedOrg,  setSelectedOrg] = useState('rays'); // subsidiary key — read from localStorage on mount, defaults to Rays
   const [showOrgDropdown, setShowOrgDropdown] = useState(false);
   const [pmoModuleUnavailable, setPmoModuleUnavailable] = useState(null);
+  const [rvunlBudget, setRvunlBudget] = useState(null);
+  const [rvunlCategoryOpen, setRvunlCategoryOpen] = useState(null); // which category key is drilled into, or null for the summary view
 
   // Real bug fixed: every fetch function below used to apply its result
   // unconditionally once the network call resolved — with no check for
@@ -2279,6 +2854,28 @@ export default function Dashboard() {
     if (selectedOrgRef.current === requestedOrg) setLoading(function(p){ return Object.assign({},p,{projects:false}); });
   }, [selectedOrg]);
 
+  // RPE Energy Reserve's PFBs Tab — currently just the one real project
+  // (RVUNL Heerapura BESS). Same race-guarded pattern as every other
+  // org-gated fetch on this page — a slow response from a previous org
+  // selection is silently discarded if the user has since switched away.
+  const fetchRVUNLBudget = useCallback(async function(){
+    const requestedOrg = selectedOrg;
+    if (requestedOrg !== 'energy') { setRvunlBudget(null); return; }
+    setLoading(function(p){ return Object.assign({},p,{rvunlBudget:true}); });
+    try {
+      const r = await fetch('/api/pfb-energy-rvunl');
+      const d = await r.json();
+      if (selectedOrgRef.current !== requestedOrg) return; // stale — user switched away from Energy while this was in flight
+      if (d.success) {
+        setRvunlBudget(d.data);
+        if (!d.integrityCheckPassed) {
+          console.error('RVUNL budget integrity check failed:', d.integrityFailures);
+        }
+      }
+    } catch (e) {}
+    if (selectedOrgRef.current === requestedOrg) setLoading(function(p){ return Object.assign({},p,{rvunlBudget:false}); });
+  }, [selectedOrg]);
+
   const fetchPFB = async function(proj){
     const key = proj.id;
     if (pfbCache[key]) return pfbCache[key];
@@ -2343,10 +2940,20 @@ export default function Dashboard() {
     }
   }, [selectedOrg, tab]);
 
+  // Real bug caught during review: rvunlCategoryOpen (which RVUNL budget
+  // category is currently drilled into) was never reset when switching
+  // subsidiaries. Confirmed sequence: open Energy's PFBs tab, click into
+  // "BESS cost", switch to Rays, switch back to Energy — without this,
+  // the user would land straight back on the stale BESS cost detail view
+  // instead of the fresh Summary, with no obvious reason why.
+  useEffect(function(){
+    setRvunlCategoryOpen(null);
+  }, [selectedOrg]);
+
   useEffect(function(){
     // Page load/reload: serve from whatever's cached server-side — this
     // costs zero Zoho calls once a cache exists (see lib/zoho.js / pmos.js).
-    fetchPOs(false); fetchBills(false); fetchPMOs(false); fetchProjects();
+    fetchPOs(false); fetchBills(false); fetchPMOs(false); fetchProjects(); fetchRVUNLBudget();
 
     // Hourly auto-refresh while this tab is left open — mirrors the
     // server-side cron's own 10am-6pm IST Mon-Sat window, so an open
@@ -2357,7 +2964,7 @@ export default function Dashboard() {
       fetchPOs(true); fetchBills(true); fetchPMOs(true);
     }, 60*60*1000);
     return function(){ clearInterval(iv); };
-  }, [fetchPOs, fetchBills, fetchPMOs, fetchProjects]);
+  }, [fetchPOs, fetchBills, fetchPMOs, fetchProjects, fetchRVUNLBudget]);
 
   // Poll the AI compliance queue's live status — purely for DISPLAY.
   // This must NEVER trigger its own data fetch: the original request
@@ -2659,7 +3266,7 @@ export default function Dashboard() {
                 <button onClick={function(){ if(tab==='pos') fetchPOs(true); else if(tab==='bills') fetchBills(true); else fetchPMOs(true); }} style={{background:'#f8fafc',color:'#475569',border:'1px solid #e2e8f0',borderRadius:7,padding:'5px 11px',cursor:'pointer',fontSize:12}}>{'\u{1F504} Refresh'}</button>
               </>
             )}
-            {tab==='pfbs' && (
+            {tab==='pfbs' && selectedOrg==='rays' && (
               <button onClick={function(){setShowUpdateRates(true);}} style={{background:'#fff7ed',color:'#c2410c',border:'1px solid #fed7aa',borderRadius:7,padding:'5px 13px',cursor:'pointer',fontSize:12,fontWeight:600}}>{'\u{1F4B0} Update Rates / Add Items'}</button>
             )}
             {tab==='projects' && (
@@ -2804,7 +3411,7 @@ export default function Dashboard() {
             </div>
           )}
 
-          {tab==='pfbs' && (
+          {tab==='pfbs' && selectedOrg==='rays' && (
             <div className="fade">
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:14,marginBottom:14,flexWrap:'wrap',background:'#fff',border:'1px solid #e2e8f0',borderRadius:10,padding:'10px 18px'}}>
                 <span style={{fontSize:11,color:'#94a3b8',fontWeight:700,letterSpacing:'0.06em',whiteSpace:'nowrap'}}>RATE/Wp LEGEND</span>
@@ -2854,6 +3461,15 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
+          )}
+
+          {tab==='pfbs' && selectedOrg==='energy' && (
+            <RVUNLBudgetTab
+              data={rvunlBudget}
+              loading={loading.rvunlBudget}
+              openCategory={rvunlCategoryOpen}
+              onOpenCategory={setRvunlCategoryOpen}
+            />
           )}
 
           {tab==='projects' && (
@@ -2953,7 +3569,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {selected && <DetailModal item={selected.item} type={selected.type} orgKey={selectedOrg} onClose={function(){setSelected(null);}}
+      {selected && <DetailModal item={selected.item} type={selected.type} orgKey={selectedOrg} pfbCandidates={rvunlBudget?.matchCandidates || []} onClose={function(){setSelected(null);}}
         onRecheckDone={function(){
           if (selected.type==='po') fetchPOs(true);
           else if (selected.type==='bill') fetchBills(true);
