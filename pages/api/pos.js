@@ -15,6 +15,7 @@ import { getPendingPOs } from '../../lib/zoho';
 import { generatePFB, checkPOAlignment, isSevere, isCaution, nameSimilarity } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runPOCompliance, getComplianceStatus } from '../../lib/checklistEngine';
+import { getPFBMatchForPBP } from '../../lib/pfb/energyRVUNLMatchEngine';
 import { getAdvancePaidByPO } from '../../lib/advanceReconcile';
 const { buildFingerprint, processAIQueueForPOs } = require('../../lib/aiComplianceEngine');
 import { buildReferenceRateRow } from '../../lib/referenceRates';
@@ -148,7 +149,20 @@ export default async function handler(req, res) {
       // shown in its own dedicated table, not mixed into the PFB/PO Match
       // tables. Every line item gets checked, regardless of whether it
       // also happens to match a PFB scope item.
-      const referenceRateChecks = lineItems
+      //
+      // Real gap found via direct testing: Energy's real line items all
+      // have item_id="" AND name="" (the actual text lives in
+      // `description` instead) — the SAME issue the reference rate
+      // backfill had, but here inside buildReferenceRateRow itself
+      // (shared, unmodified for Rays). Without this, the table would
+      // show "no history" for every Energy item even after a correct
+      // backfill, since it could never even look up the right group key.
+      // Fallback is strictly gated to orgKey==='energy' so Rays' path
+      // (where name is always populated) is completely unaffected.
+      const lineItemsForRefRate = orgKey === 'energy'
+        ? lineItems.map(li => (li.name && li.name.trim()) ? li : { ...li, name: (li.description || '').trim() })
+        : lineItems;
+      const referenceRateChecks = lineItemsForRefRate
         .map(li => buildReferenceRateRow(li, 'po', rrCatalog, rrHistory, nameSimilarity, new Date().toISOString()))
         .filter(Boolean);
 
@@ -168,6 +182,20 @@ export default async function handler(req, res) {
 
       // ── FINAL RECOMMENDATION based on BOTH checks
       const recommendation = buildRecommendation(complianceStatus, alignmentStatus, compliance);
+
+      // PFB Match — Energy-only, RVUNL project specifically. Gated so
+      // this never runs, or has any effect at all, for any other
+      // subsidiary. Cached internally by getPFBMatchForPBP, keyed by
+      // this PO's own real line items, so it only re-runs when they
+      // actually change.
+      let pfbMatch = null;
+      if (orgKey === 'energy') {
+        try {
+          pfbMatch = await getPFBMatchForPBP(po, 'po', po.purchaseorder_id);
+        } catch (e) {
+          console.error(`[${orgKey}] PFB Match failed for PO ${po.purchaseorder_number}:`, e.message);
+        }
+      }
 
       return {
         id:             po.purchaseorder_id,
@@ -194,6 +222,7 @@ export default async function handler(req, res) {
         attachments:    po.documents || [],
         pfbTotal,
         pfbUnavailableReason,
+        pfbMatch,
 
         // New in this round — confirmed against Zoho's official PO field
         // names. "subject" isn't a standard Books field, so it's pulled

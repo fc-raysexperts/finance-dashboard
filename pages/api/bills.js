@@ -20,6 +20,7 @@ import { getPendingBills, getCachedPODetail, getPendingPOs } from '../../lib/zoh
 import { generatePFB, checkPOAlignment, nameSimilarity, compareValue, isSevere, isCaution } from '../../lib/pfbEngine';
 import { PROJECTS, matchProject } from '../../data/projects';
 import { runBillCompliance, getComplianceStatus } from '../../lib/checklistEngine';
+import { getPFBMatchForPBP } from '../../lib/pfb/energyRVUNLMatchEngine';
 import { processAIQueueForBills } from '../../lib/aiComplianceEngine';
 const { buildFingerprint } = require('../../lib/aiComplianceEngine');
 import { buildReferenceRateRow } from '../../lib/referenceRates';
@@ -219,7 +220,14 @@ export default async function handler(req, res) {
 
       // ── COMPLIANCE CHECK (always runs) ────────────────────
       // ── REFERENCE RATE CHECKS — independent of PFB/PO alignment.
-      const referenceRateChecks = lineItems
+      // Same real gap fixed as pos.js — Energy's line items have
+      // name="" with the real text in `description` instead, which
+      // buildReferenceRateRow (shared, unmodified for Rays) can't look
+      // up without this fallback. Gated to orgKey==='energy' only.
+      const lineItemsForRefRate = orgKey === 'energy'
+        ? lineItems.map(li => (li.name && li.name.trim()) ? li : { ...li, name: (li.description || '').trim() })
+        : lineItems;
+      const referenceRateChecks = lineItemsForRefRate
         .map(li => buildReferenceRateRow(li, 'bill', rrCatalog, rrHistory, nameSimilarity, new Date().toISOString()))
         .filter(Boolean);
 
@@ -242,6 +250,17 @@ export default async function handler(req, res) {
       const recommendation = buildRecommendation(
         complianceStatus, alignmentStatus, compliance, linkedPO || linkedPORef
       );
+
+      // PFB Match — Energy-only, RVUNL project specifically. Same
+      // gating and caching approach as pos.js.
+      let pfbMatch = null;
+      if (orgKey === 'energy') {
+        try {
+          pfbMatch = await getPFBMatchForPBP(bill, 'bill', bill.bill_id);
+        } catch (e) {
+          console.error(`[${orgKey}] PFB Match failed for Bill ${bill.bill_number}:`, e.message);
+        }
+      }
 
       return {
         id:             bill.bill_id,
@@ -267,6 +286,7 @@ export default async function handler(req, res) {
         attachments:    bill.documents         || [],
         noPOExpected,
         pfbUnavailableReason,
+        pfbMatch,
         paymentTerms:   bill.payment_terms_label || (bill.payment_terms != null ? `Net ${bill.payment_terms}` : ''),
         // Real bug fixed: bill_type was assumed to be a standard Books
         // field, but the real sample PDF shows "Bill Type: Expense" sitting
