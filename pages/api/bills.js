@@ -461,10 +461,24 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
   // Real fix: was `!c.passed`, which would silently exclude the new
   // 'no-evidence' state (a truthy string) from Recommendation reasons.
   const isConcern = c => c.passed !== true && c.passed !== 'uncertain';
-  const failed = compliance.filter(isConcern);
+
+  // Real fix, matching the same one in checklistEngine.js's
+  // getComplianceStatus: po_ref unconditionally fails whenever there's
+  // no linked PO, but bill_no_po exists specifically to validate the
+  // ALTERNATE acceptable path (management approval + RP Sir's genuine
+  // sign-off) for exactly that situation. Once bill_no_po genuinely
+  // passes, po_ref's bare "no PO" failure is the expected, accepted
+  // state — not a real concern. Excluded right here, at the source,
+  // so every branch below (criticalFails, the 'warn' reasons list, and
+  // the old unconditional !linkedPO fallback) consistently reflects it
+  // rather than needing separate patches in each place.
+  const billNoPoCheck = compliance.find(c => c.id === 'bill_no_po');
+  const alternateApprovalConfirmed = billNoPoCheck?.passed === true;
+  const failed = compliance.filter(c => isConcern(c) && !(c.id === 'po_ref' && alternateApprovalConfirmed));
+
   // Real bug fixed: several checks can genuinely share the exact same
   // comment (e.g. multiple AI-pending checks on a bill with zero
-  // attachments all say "No attachment is present...") — without
+  // attachments all say \"No attachment is present...\") — without
   // deduping, the Recommendation section would list that identical line
   // once per check instead of once total.
   const dedupe = (arr) => [...new Set(arr)];
@@ -478,7 +492,7 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
   // surfacing it a second time here (and letting it drive REJECT/FLAG)
   // was redundant, and the PFB scope currently doesn't cover all items
   // the firm actually uses, so it isn't reliable enough yet to gate a
-  // recommendation decision on its own. "No linked PO" is kept since
+  // recommendation decision on its own. \"No linked PO\" is kept since
   // that's a genuine compliance concern (bill_no_po check), independent
   // of whether PFB alignment could be computed.
   if (compStatus === 'fail' || criticalFails.length > 0) {
@@ -497,7 +511,12 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
     };
   }
 
-  if (!linkedPO) {
+  // Real fix: only treat "no linked PO" as its own separate concern when
+  // the alternate approval path hasn't already been confirmed — once
+  // bill_no_po has genuinely verified RP Sir's sign-off, a bill with no
+  // PO can reach a full APPROVE like any other, instead of being stuck
+  // at FLAG FOR REVIEW purely because a PO doesn't exist for it.
+  if (!linkedPO && !alternateApprovalConfirmed) {
     return {
       decision: 'FLAG FOR REVIEW',
       color:    'amber',
@@ -514,7 +533,11 @@ function buildRecommendation(compStatus, alignStatus, compliance, linkedPO) {
     color:    'green',
     reasons:  [
       'All bill compliance checks passed',
-      `Amounts match PO ${linkedPO.number || linkedPO.purchaseorder_number || ''}`,
+      linkedPO
+        ? `Amounts match PO ${linkedPO.number || linkedPO.purchaseorder_number || ''}`
+        : alternateApprovalConfirmed
+          ? "No PO required — management approval and RP Sir's sign-off confirmed"
+          : null,
     ].filter(Boolean),
   };
 }
